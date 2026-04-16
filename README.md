@@ -28,4 +28,4 @@ recon-all -s <subjid> -hemi rh -pctsurfcon
 - tests
 - check that training scripts are reproducible, these were transplanted from another repo
 - check that cache directories are minimal, only cache what is needed
-- check what cortexode was trained on - sometimes it fails. this is likely from passing raw images into the model - i think it expects orig.mgz, a preprocessed version of rawavg.mgz
+- check what cortexode was trained on - sometimes it fails. this is likely from passing raw images into the model - i think it expects orig.mgz, a preprocessed version of rawavg.mgz. Related, we should re-train models on orig.mgz, this should be in 256^3 space (useful since the model expects 16^3 patches for the transformer), with 1mm voxels. The current preprocessing of rawavg.mgz -> rawavg.pt is bug prune, instead, we should use: `mri_convert rawavg.mgz orig.mgz --conform`.
