@@ -1,0 +1,9 @@
+numpy
+scipy
+scikit-image
+numba
+nibabel
+trimesh
+tqdm
+torch
+torchdiffeq
