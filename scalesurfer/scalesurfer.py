@@ -6,8 +6,12 @@ import numpy as np
 import torch
 from tqdm.auto import tqdm
 
-from scalesurfer.config import DEVICE, MODULE_PATH, DATA_PATH
-from scalesurfer.convert import prepare_image
+from scalesurfer.config import DEVICE, MODULE_PATH
+import nibabel as nib
+from nibabel.processing import resample_from_to
+
+from scalesurfer.convert import MNI_AFFINE, prepare_image, _build_fs_conform_reference
+from scalesurfer.surface.cortex_ode import _mni_tensor_to_conform
 from scalesurfer.data import (
     build_label_lut,
     default_aparc_aseg_label_values,
@@ -60,7 +64,7 @@ class ScaleSurfer:
         self.device = DEVICE if device is None else device
 
         # todo: load based on fs_version kwarg
-        self.chkpt_path_volume = MODULE_PATH.parent / "docs" / "notebooks" / "checkpoints_fsv8" / "fsv8_20260402_034229" / "transunet3d_best.pt"
+        self.chkpt_path_volume = MODULE_PATH.parent / "docs" / "notebooks" / "checkpoints_fsv8" / "fsv8_20260413_164217" / "transunet3d_best.pt"
 
         assert len(anat_files) == len(subjects), "anat_files and subjects must have the same length"
         self.prepare_directories()
@@ -193,7 +197,10 @@ class ScaleSurfer:
             if torch.is_tensor(aparc_fs):
                 aparc_fs = aparc_fs.detach().cpu().numpy()
             aparc_fs_np = np.asarray(aparc_fs, dtype=np.int32)
+            # aparc_fs_np is MNI space (197×233×189); pad to 256³ so CortexODE
+            # process_volume crop indices and process_surface_inverse math are correct.
+            aparc_conform = np.asarray(np.rint(_mni_tensor_to_conform(aparc_fs_np)), dtype=np.int32)
 
-            result = self._predict_surface(subj, aparc_fs_np)
+            result = self._predict_surface(subj, aparc_conform)
             pred_surfaces = result["surfaces"]
             save_surfaces_to_subject_dir(pred_surfaces, self.subject_dir / subj / "surf")

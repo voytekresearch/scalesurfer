@@ -9,10 +9,13 @@ import tempfile
 from typing import Any
 from typing import Tuple
 
+from nilearn.datasets import load_mni152_template
+from nilearn.datasets import load_mni152_template
 import numpy as np
 import torch
 from nibabel.processing import resample_from_to
 from tqdm.contrib.concurrent import process_map
+from nilearn.image import resample_img
 
 from pathlib import Path
 
@@ -22,8 +25,15 @@ from nibabel.filebasedimages import ImageFileError
 
 TARGET_VOXEL_SIZE_MM = 1.0
 TARGET_SHAPE = (197, 233, 189)
+CONFORM_SHAPE = (256, 256, 256)  # FreeSurfer orig.mgz conformed grid
 _GZIP_MAGIC = b"\x1f\x8b"
 
+MNI_SHAPE = (197, 233, 189)
+MNI_AFFINE = np. array([
+    [   1.,    0.,    0.,  -98.],
+    [   0.,    1.,    0., -134.],
+    [   0.,    0.,    1.,  -72.],
+    [   0.,    0.,    0.,    1.]])
 
 def _is_gzip_file(path: str | Path) -> bool:
     with open(path, "rb") as f:
@@ -172,6 +182,8 @@ def _center_crop_or_pad_3d(
     target_shape: tuple[int, int, int],
     *,
     pad_value: float | int,
+    safe: bool = True,
+    affine: np.ndarray | None = None
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Center crop/pad a 3D array.
@@ -182,7 +194,17 @@ def _center_crop_or_pad_3d(
         Output array with `target_shape`.
     delta : np.ndarray
         Voxel offset mapping output indices to input indices: in = out + delta.
+    safe : bool
+        If True, the image is resample to MNI space.
+        The old default lead to cropping out valid brain regions for images that
+        were not well centered or irregularly shapeed Future should use safe=True,
+        however resample_to_img it very slow at scale.
     """
+    if safe:
+        # ignore shape, uses MNI 1mm shape, prevents cropping out valid regions
+        out = resample_img(nib.Nifti1Image(arr, affine), MNI_AFFINE, MNI_SHAPE)
+        return out, np.zeros(3, dtype=np.float64)
+
     if arr.ndim != 3:
         raise ValueError(f"Expected 3D array, got shape {arr.shape}")
 
@@ -241,6 +263,7 @@ def _resample_to_1mm_same_space(
 def prepare_images_if_needed(
     rawavg_path: str | Path,
     aparc_path: str | Path,
+    safe: bool = False
 ) -> Tuple[nib.Nifti1Image, nib.Nifti1Image]:
     """
     Return rawavg and aparc+aseg as Nifti1Image with:
@@ -280,11 +303,15 @@ def prepare_images_if_needed(
         rawavg_data,
         TARGET_SHAPE,
         pad_value=0.0,
+        affine=rawavg_1mm.affine,
+        safe=safe
     )
     aparc_fixed, _ = _center_crop_or_pad_3d(
         aparc_data,
         TARGET_SHAPE,
         pad_value=0,
+        affine=aparc_1mm.affine,
+        safe=safe
     )
     out_affine = _shift_affine_for_voxel_offset(rawavg_1mm.affine, delta)
 
@@ -296,7 +323,7 @@ def prepare_images_if_needed(
 
 def debug_prepare_images_report(
     rawavg_path: str | Path,
-    aparc_path: str | Path,
+    aparc_path: str | Path
 ) -> dict[str, Any]:
     """
     Lightweight geometry sanity report for debugging conversion quality.
@@ -529,34 +556,33 @@ def convert_file_map_to_pt(
     return results
 
 
-def prepare_image(img_path: str | Path) -> nib.Nifti1Image:
+def _build_fs_conform_reference(img: nib.spatialimages.SpatialImage) -> nib.Nifti1Image:
     """
-    Return nii.gz file as Nifti1Image with:
-    - shared voxel grid between image and labels
-    - 1mm isotropic spacing
-    - fixed output shape (center crop/pad)
+    Build a synthetic FreeSurfer-conformed 256³ at 1mm reference grid.
 
-    Steps:
-    1) Reorient both to RAS (no registration).
-    2) Align rawavg to aparc native grid if needed.
-    3) Resample both to 1mm isotropic in that same native space.
-    4) Center crop/pad to TARGET_SHAPE for uniform tensor size.
+    Replicates the effect of using aparc+aseg.mgz as the resample target in
+    prepare_images_if_needed: the FS conform step places the image center at
+    voxel (128, 128, 128), so we build a 256³ RAS grid with that property
+    from the input image's own affine — no aparc needed.
+    """
+    shape = np.asarray(img.shape[:3], dtype=np.float64)
+    center_world = nib.affines.apply_affine(img.affine, (shape - 1.0) / 2.0)
+    conform_affine = np.eye(4, dtype=np.float64)
+    conform_affine[:3, 3] = center_world - 128.0  # voxel (128,128,128) → image center
+    return nib.Nifti1Image(np.zeros(CONFORM_SHAPE, dtype=np.float32), conform_affine)
+
+
+def prepare_image(img_path: str | Path, *, safe: bool = False) -> torch.Tensor:
+    """
+    Return a raw NIfTI as a float32 tensor ready for model inference.
+
+    Resamples onto a synthetic FreeSurfer-conformed 256³ at 1mm grid
+    (matching the aparc+aseg.mgz grid used during training), then
+    center-crops to TARGET_SHAPE.
     """
     img = _as_ras(load_mgz(img_path))
-
-    img = _resample_to_1mm_same_space(
-        nib.Nifti1Image(img.get_fdata(dtype=np.float32), img.affine),
-        is_labels=False
-    )
-
-    data = img.get_fdata(dtype=np.float32)
-
-    fixed, delta = _center_crop_or_pad_3d(
-        data,
-        TARGET_SHAPE,
-        pad_value=0.0,
-    )
-    out_affine = _shift_affine_for_voxel_offset(img.affine, delta)
-    img = nib.Nifti1Image(fixed, out_affine)
-    arr = img.get_fdata(dtype=np.float32)
-    return torch.from_numpy(np.asarray(arr, dtype=np.float32))
+    conform_ref = _build_fs_conform_reference(img)
+    img_conform = _resample_image_to_reference(img, conform_ref, is_labels=False)
+    data = img_conform.get_fdata(dtype=np.float32)
+    fixed, _ = _center_crop_or_pad_3d(data, TARGET_SHAPE, pad_value=0.0, safe=safe, affine=img.affine)
+    return torch.from_numpy(np.asarray(fixed, dtype=np.float32))
