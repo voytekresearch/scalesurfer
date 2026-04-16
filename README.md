@@ -28,3 +28,4 @@ recon-all -s <subjid> -hemi rh -pctsurfcon
 - tests
 - check that training scripts are reproducible, these were transplanted from another repo
 - check that cache directories are minimal, only cache what is needed
+- check what cortexode was trained on - sometimes it fails. this is likely from passing raw images into the model - i think it expects orig.mgz, a preprocessed version of rawavg.mgz
