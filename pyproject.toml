@@ -1,0 +1,43 @@
+[project]
+name = "scalesurfer"
+version = "0.1.0"
+description = "3D TransUNet segmentation and parcellation + CortexODE surface reconstruction."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "joblib",
+    "matplotlib",
+    "nibabel",
+    "nilearn",
+    "numba",
+    "numpy",
+    "pandas",
+    "scikit-image",
+    "scipy",
+    "torch",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+openneuro = [
+    "boto3",
+    "botocore",
+    "joblib",
+    "matplotlib",
+    "nibabel",
+    "nilearn",
+    "numba",
+    "numpy",
+    "pandas",
+    "scikit-image",
+    "scipy",
+    "torch",
+    "tqdm",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["scalesurfer"]
