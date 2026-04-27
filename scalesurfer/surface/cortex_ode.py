@@ -194,23 +194,6 @@ def resample_tensor_labels_to_native(
     return nib.MGHImage(data, native_ref.affine, header=native_ref.header)
 
 
-def _mni_tensor_to_conform(arr: np.ndarray) -> np.ndarray:
-    """Resample a (197,233,189) MNI-space array to a synthetic 256³ FreeSurfer conform grid.
-
-    ``process_volume`` and ``process_surface_inverse`` both assume a 256³ input:
-    the crop indices ``[40:-40, 24:-24, 40:-40]`` and the hardcoded inverse
-    arithmetic only give correct results when the input is 256×256×256.
-    ``rawavg.pt`` / ``aparc+aseg.pt`` are stored in MNI space (197×233×189);
-    this function pads them back to the conformed grid before CortexODE sees them.
-    """
-    from scalesurfer.convert import MNI_AFFINE, _build_fs_conform_reference
-    mni_img = nib.Nifti1Image(np.asarray(arr, dtype=np.float32), MNI_AFFINE)
-    conform_ref = _build_fs_conform_reference(mni_img)
-    order = 0 if np.issubdtype(arr.dtype, np.integer) else 1
-    out = resample_from_to(mni_img, conform_ref, order=order)
-    return out.get_fdata(dtype=np.float32)
-
-
 def prepare_reference_volume(
     subject_dir: str | Path,
     *,
@@ -218,19 +201,11 @@ def prepare_reference_volume(
 ) -> np.ndarray:
     """Load ``orig.mgz`` and preprocess it exactly like the reference code."""
     subject_dir = Path(subject_dir)
-
-    try:
-        orig_path = subject_dir / "mri" / "rawavg.pt"
-        orig_arr = torch.load(orig_path).cpu().numpy()
-        # rawavg.pt is MNI space (197×233×189); process_volume and
-        # process_surface_inverse both assume 256³ — pad back before processing.
-        orig_arr = _mni_tensor_to_conform(orig_arr)
-    except:
-        orig_path = subject_dir / "mri" / "orig.mgz"
-        if not orig_path.exists():
-            raise FileNotFoundError(f"Missing orig.mgz: {orig_path}")
-        orig = nib.load(str(orig_path))
-        orig_arr = np.asarray(orig.get_fdata(), dtype=np.float32)
+    orig_path = subject_dir / "mri" / "orig.mgz"
+    if not orig_path.exists():
+        raise FileNotFoundError(f"Missing orig.mgz: {orig_path}")
+    orig = nib.load(str(orig_path))
+    orig_arr = np.asarray(orig.get_fdata(), dtype=np.float32)
     return process_volume((orig_arr / 255.0).astype(np.float32), config.data_name).astype(np.float32)
 
 

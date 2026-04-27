@@ -622,11 +622,15 @@ def save_surfaces_to_subject_dir(
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = {}
     for name, surf in surfaces.items():
-        verts = surf["vertices_ras"]
-        faces = surf["faces"]
+        verts = np.asarray(surf["vertices_ras"], dtype=np.float32)
+        faces = np.asarray(surf["faces"], dtype=np.int32)
         if verts.shape[0] == 0:
             print(f"Skipping {name}: empty surface")
             continue
+        # CortexODE produces inward normals (negative nibabel signed_vol).
+        # FreeSurfer's mri_brainvol_stats needs outward normals (positive signed_vol)
+        # for CortexVol = PialVol - WhiteVol to be positive. Flip face winding.
+        faces = np.ascontiguousarray(faces[:, [0, 2, 1]])
         out_path = out_dir / name
         write_geometry(str(out_path), verts, faces)
         paths[name] = out_path

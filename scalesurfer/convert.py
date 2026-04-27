@@ -5,11 +5,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import tempfile
-
+from pathlib import Path
+import shlex
+import subprocess
 from typing import Any
 from typing import Tuple
 
-from nilearn.datasets import load_mni152_template
 from nilearn.datasets import load_mni152_template
 import numpy as np
 import torch
@@ -17,14 +18,11 @@ from nibabel.processing import resample_from_to
 from tqdm.contrib.concurrent import process_map
 from nilearn.image import resample_img
 
-from pathlib import Path
-
-
 import nibabel as nib
 from nibabel.filebasedimages import ImageFileError
 
 TARGET_VOXEL_SIZE_MM = 1.0
-TARGET_SHAPE = (197, 233, 189)
+TARGET_SHAPE = (256, 256, 256)
 CONFORM_SHAPE = (256, 256, 256)  # FreeSurfer orig.mgz conformed grid
 _GZIP_MAGIC = b"\x1f\x8b"
 
@@ -93,27 +91,27 @@ def align_mgz_to_reference(
     return nib.Nifti1Image(data, out.affine)
 
 
-def prepare_rawavg_and_aparc_arrays(
-    rawavg_path: str | Path,
+def prepare_orig_and_aparc_arrays(
+    orig_path: str | Path,
     aparc_path: str | Path,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Return rawavg and aparc+aseg as NumPy arrays on the SAME grid.
+    Return orig and aparc+aseg as NumPy arrays on the SAME grid.
 
-    rawavg is resampled onto the aparc+aseg grid.
+    orig is resampled onto the aparc+aseg grid.
     aparc+aseg is kept as-is.
     """
-    rawavg_resampled = align_mgz_to_reference(
-        moving_path=rawavg_path,
+    orig_resampled = align_mgz_to_reference(
+        moving_path=orig_path,
         reference_path=aparc_path,
         is_labels=False,
     )
     aparc_img = _as_ras(load_mgz(aparc_path))
 
-    rawavg_arr = np.asarray(rawavg_resampled.get_fdata(), dtype=np.float32)
+    orig_arr = np.asarray(orig_resampled.get_fdata(), dtype=np.float32)
     aparc_arr = np.asarray(np.rint(aparc_img.get_fdata()), dtype=np.int32)
 
-    return rawavg_arr, aparc_arr
+    return orig_arr, aparc_arr
 
 
 def arrays_are_same_grid(
@@ -261,49 +259,49 @@ def _resample_to_1mm_same_space(
 
 
 def prepare_images_if_needed(
-    rawavg_path: str | Path,
+    orig_path: str | Path,
     aparc_path: str | Path,
     safe: bool = False
 ) -> Tuple[nib.Nifti1Image, nib.Nifti1Image]:
     """
-    Return rawavg and aparc+aseg as Nifti1Image with:
+    Return orig and aparc+aseg as Nifti1Image with:
     - shared voxel grid between image and labels
     - 1mm isotropic spacing
     - fixed output shape (center crop/pad)
 
     Steps:
     1) Reorient both to RAS (no registration).
-    2) Align rawavg to aparc native grid if needed.
+    2) Align orig to aparc native grid if needed.
     3) Resample both to 1mm isotropic in that same native space.
     4) Center crop/pad to TARGET_SHAPE for uniform tensor size.
     """
-    rawavg_img = _as_ras(load_mgz(rawavg_path))
+    orig_img = _as_ras(load_mgz(orig_path))
     aparc_img = _as_ras(load_mgz(aparc_path))
 
-    if _same_grid_img(rawavg_img, aparc_img):
-        rawavg_native = nib.Nifti1Image(rawavg_img.get_fdata(dtype=np.float32), rawavg_img.affine)
+    if _same_grid_img(orig_img, aparc_img):
+        orig_native = nib.Nifti1Image(orig_img.get_fdata(dtype=np.float32), orig_img.affine)
         aparc_native = nib.Nifti1Image(
             np.asarray(np.rint(aparc_img.get_fdata()), dtype=np.int32),
             aparc_img.affine,
         )
     else:
-        rawavg_native = _resample_image_to_reference(rawavg_img, aparc_img, is_labels=False)
+        orig_native = _resample_image_to_reference(orig_img, aparc_img, is_labels=False)
         aparc_native = nib.Nifti1Image(
             np.asarray(np.rint(aparc_img.get_fdata()), dtype=np.int32),
             aparc_img.affine,
         )
 
-    rawavg_1mm = _resample_to_1mm_same_space(rawavg_native, is_labels=False)
+    orig_1mm = _resample_to_1mm_same_space(orig_native, is_labels=False)
     aparc_1mm = _resample_to_1mm_same_space(aparc_native, is_labels=True)
 
-    rawavg_data = rawavg_1mm.get_fdata(dtype=np.float32)
+    orig_data = orig_1mm.get_fdata(dtype=np.float32)
     aparc_data = np.asarray(aparc_1mm.dataobj, dtype=np.int32)
 
-    rawavg_fixed, delta = _center_crop_or_pad_3d(
-        rawavg_data,
+    orig_fixed, delta = _center_crop_or_pad_3d(
+        orig_data,
         TARGET_SHAPE,
         pad_value=0.0,
-        affine=rawavg_1mm.affine,
+        affine=orig_1mm.affine,
         safe=safe
     )
     aparc_fixed, _ = _center_crop_or_pad_3d(
@@ -313,52 +311,52 @@ def prepare_images_if_needed(
         affine=aparc_1mm.affine,
         safe=safe
     )
-    out_affine = _shift_affine_for_voxel_offset(rawavg_1mm.affine, delta)
+    out_affine = _shift_affine_for_voxel_offset(orig_1mm.affine, delta)
 
     return (
-        nib.Nifti1Image(rawavg_fixed, out_affine),
+        nib.Nifti1Image(orig_fixed, out_affine),
         nib.Nifti1Image(aparc_fixed, out_affine),
     )
 
 
 def debug_prepare_images_report(
-    rawavg_path: str | Path,
+    orig_path: str | Path,
     aparc_path: str | Path
 ) -> dict[str, Any]:
     """
     Lightweight geometry sanity report for debugging conversion quality.
     """
-    rawavg_orig = _as_ras(load_mgz(rawavg_path))
+    orig_orig = _as_ras(load_mgz(orig_path))
     aparc_orig = _as_ras(load_mgz(aparc_path))
-    rawavg_out, aparc_out = prepare_images_if_needed(rawavg_path, aparc_path)
+    orig_out, aparc_out = prepare_images_if_needed(orig_path, aparc_path)
 
-    rawavg_arr = rawavg_out.get_fdata(dtype=np.float32)
+    orig_arr = orig_out.get_fdata(dtype=np.float32)
     aparc_arr = np.asarray(aparc_out.dataobj, dtype=np.int32)
     label_mask = aparc_arr > 0
-    image_mask = rawavg_arr != 0
+    image_mask = orig_arr != 0
     overlap_ratio = float((label_mask & image_mask).sum() / max(1, int(label_mask.sum())))
 
-    out_zooms = tuple(float(x) for x in nib.affines.voxel_sizes(rawavg_out.affine)[:3])
-    orig_rawavg_zooms = tuple(float(x) for x in nib.affines.voxel_sizes(rawavg_orig.affine)[:3])
+    out_zooms = tuple(float(x) for x in nib.affines.voxel_sizes(orig_out.affine)[:3])
+    orig_orig_zooms = tuple(float(x) for x in nib.affines.voxel_sizes(orig_orig.affine)[:3])
     orig_aparc_zooms = tuple(float(x) for x in nib.affines.voxel_sizes(aparc_orig.affine)[:3])
 
     return {
-        "orig_rawavg_shape": tuple(int(x) for x in rawavg_orig.shape),
+        "orig_orig_shape": tuple(int(x) for x in orig_orig.shape),
         "orig_aparc_shape": tuple(int(x) for x in aparc_orig.shape),
-        "orig_rawavg_axcodes": tuple(nib.aff2axcodes(rawavg_orig.affine)),
+        "orig_orig_axcodes": tuple(nib.aff2axcodes(orig_orig.affine)),
         "orig_aparc_axcodes": tuple(nib.aff2axcodes(aparc_orig.affine)),
-        "orig_rawavg_voxel_sizes": orig_rawavg_zooms,
+        "orig_orig_voxel_sizes": orig_orig_zooms,
         "orig_aparc_voxel_sizes": orig_aparc_zooms,
         "target_voxel_size_mm": (TARGET_VOXEL_SIZE_MM, TARGET_VOXEL_SIZE_MM, TARGET_VOXEL_SIZE_MM),
         "target_shape": TARGET_SHAPE,
-        "out_rawavg_shape": tuple(int(x) for x in rawavg_out.shape),
+        "out_orig_shape": tuple(int(x) for x in orig_out.shape),
         "out_aparc_shape": tuple(int(x) for x in aparc_out.shape),
-        "out_rawavg_axcodes": tuple(nib.aff2axcodes(rawavg_out.affine)),
+        "out_orig_axcodes": tuple(nib.aff2axcodes(orig_out.affine)),
         "out_aparc_axcodes": tuple(nib.aff2axcodes(aparc_out.affine)),
         "out_voxel_sizes": out_zooms,
         "out_same_grid": bool(
-            rawavg_out.shape == aparc_out.shape
-            and np.allclose(rawavg_out.affine, aparc_out.affine)
+            orig_out.shape == aparc_out.shape
+            and np.allclose(orig_out.affine, aparc_out.affine)
         ),
         "out_is_1mm": bool(
             np.allclose(
@@ -372,17 +370,17 @@ def debug_prepare_images_report(
 
 
 def prepare_arrays_if_needed(
-    rawavg_path: str | Path,
+    orig_path: str | Path,
     aparc_path: str | Path,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Load both images, co-register to shared native grid, resample to 1mm isotropic,
     then center crop/pad to fixed TARGET_SHAPE and return arrays.
     """
-    rawavg_out, aparc_out = prepare_images_if_needed(rawavg_path, aparc_path)
-    rawavg = rawavg_out.get_fdata(dtype=np.float32)
+    orig_out, aparc_out = prepare_images_if_needed(orig_path, aparc_path)
+    orig = orig_out.get_fdata(dtype=np.float32)
     aparc = np.asarray(aparc_out.dataobj, dtype=np.int32)
-    return rawavg, aparc
+    return orig, aparc
 
 
 def _safe_output_subdir(base_path: str | Path, out_root: str | Path) -> Path:
@@ -416,53 +414,53 @@ def _process_one_entry(
     unsafe_int8: bool = False,
 ) -> dict[str, Any]:
     """
-    Run prepare_arrays_if_needed(rawavg, aparc+aseg), then save:
-      - rawavg.pt as float32
+    Run prepare_arrays_if_needed(orig, aparc+aseg), then save:
+      - orig.pt as float32
       - aparc+aseg.pt as int16 by default, or int8 if unsafe_int8=True
 
     Robustness behavior:
     - Skip writing files that already exist.
     - On conversion/save error, print the failing file/path and continue.
     """
-    if "rawavg" not in paths or "aparc+aseg" not in paths:
+    if "orig" not in paths or "aparc+aseg" not in paths:
         return {
             "base_path": base_path,
             "ok": False,
-            "error": "missing required keys: 'rawavg' and/or 'aparc+aseg'",
+            "error": "missing required keys: 'orig' and/or 'aparc+aseg'",
         }
 
     out_dir = _safe_output_subdir(base_path, out_root)
-    rawavg_out = out_dir / "rawavg.pt"
+    orig_out = out_dir / "orig.pt"
     aparc_out = out_dir / "aparc+aseg.pt"
 
-    rawavg_exists = _pt_exists(rawavg_out)
+    orig_exists = _pt_exists(orig_out)
     aparc_exists = _pt_exists(aparc_out)
-    if rawavg_exists and aparc_exists:
+    if orig_exists and aparc_exists:
         return {
             "base_path": base_path,
             "ok": True,
             "skipped_existing": True,
-            "rawavg_out": str(rawavg_out),
+            "orig_out": str(orig_out),
             "aparc_out": str(aparc_out),
         }
 
-    rawavg_path = paths["rawavg"]
+    orig_path = paths["orig"]
     aparc_path = paths["aparc+aseg"]
 
     try:
-        rawavg_arr, aparc_arr = prepare_arrays_if_needed(rawavg_path, aparc_path)
+        orig_arr, aparc_arr = prepare_arrays_if_needed(orig_path, aparc_path)
     except Exception as e:
-        print(f"[convert-error] {rawavg_path}", flush=True)
+        print(f"[convert-error] {orig_path}", flush=True)
         print(f"[convert-error] {aparc_path}", flush=True)
         return {
             "base_path": base_path,
             "ok": False,
             "error": str(e),
-            "rawavg_out": str(rawavg_out),
+            "orig_out": str(orig_out),
             "aparc_out": str(aparc_out),
         }
 
-    rawavg_tensor = torch.from_numpy(np.asarray(rawavg_arr, dtype=np.float32))
+    orig_tensor = torch.from_numpy(np.asarray(orig_arr, dtype=np.float32))
     if unsafe_int8:
         aparc_tensor = torch.from_numpy(np.asarray(aparc_arr, dtype=np.int8))
         aparc_dtype = "int8"
@@ -472,17 +470,17 @@ def _process_one_entry(
 
     save_errors: list[str] = []
 
-    if not rawavg_exists:
+    if not orig_exists:
         try:
-            torch.save(rawavg_tensor, rawavg_out)
+            torch.save(orig_tensor, orig_out)
         except Exception as e:
-            print(f"[save-error] {rawavg_out}", flush=True)
-            if rawavg_out.exists():
+            print(f"[save-error] {orig_out}", flush=True)
+            if orig_out.exists():
                 try:
-                    rawavg_out.unlink()
+                    orig_out.unlink()
                 except Exception:
                     pass
-            save_errors.append(f"{rawavg_out}: {e}")
+            save_errors.append(f"{orig_out}: {e}")
 
     if not aparc_exists:
         try:
@@ -501,7 +499,7 @@ def _process_one_entry(
             "base_path": base_path,
             "ok": False,
             "error": " | ".join(save_errors),
-            "rawavg_out": str(rawavg_out),
+            "orig_out": str(orig_out),
             "aparc_out": str(aparc_out),
             "aparc_dtype": aparc_dtype,
         }
@@ -509,9 +507,9 @@ def _process_one_entry(
     return {
         "base_path": base_path,
         "ok": True,
-        "rawavg_out": str(rawavg_out),
+        "orig_out": str(orig_out),
         "aparc_out": str(aparc_out),
-        "rawavg_shape": tuple(rawavg_tensor.shape),
+        "orig_shape": tuple(orig_tensor.shape),
         "aparc_shape": tuple(aparc_tensor.shape),
         "aparc_dtype": aparc_dtype,
         "skipped_existing": False,
@@ -556,33 +554,24 @@ def convert_file_map_to_pt(
     return results
 
 
-def _build_fs_conform_reference(img: nib.spatialimages.SpatialImage) -> nib.Nifti1Image:
-    """
-    Build a synthetic FreeSurfer-conformed 256³ at 1mm reference grid.
+def run_mri_convert(img: str | Path, orig: str | Path, extra_args: str = "--conform") -> None:
+    cmd = f"mri_convert {img} {orig} {extra_args}"
+    args = shlex.split(cmd)
+    subprocess.run(
+        args,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
 
-    Replicates the effect of using aparc+aseg.mgz as the resample target in
-    prepare_images_if_needed: the FS conform step places the image center at
-    voxel (128, 128, 128), so we build a 256³ RAS grid with that property
-    from the input image's own affine — no aparc needed.
-    """
-    shape = np.asarray(img.shape[:3], dtype=np.float64)
-    center_world = nib.affines.apply_affine(img.affine, (shape - 1.0) / 2.0)
-    conform_affine = np.eye(4, dtype=np.float64)
-    conform_affine[:3, 3] = center_world - 128.0  # voxel (128,128,128) → image center
-    return nib.Nifti1Image(np.zeros(CONFORM_SHAPE, dtype=np.float32), conform_affine)
-
-
-def prepare_image(img_path: str | Path, *, safe: bool = False) -> torch.Tensor:
+def prepare_image(img_path: str | Path, out_path: str | Path) -> torch.Tensor:
     """
     Return a raw NIfTI as a float32 tensor ready for model inference.
 
-    Resamples onto a synthetic FreeSurfer-conformed 256³ at 1mm grid
-    (matching the aparc+aseg.mgz grid used during training), then
-    center-crops to TARGET_SHAPE.
+    Conforms to FreeSurfer's 256^3 1mm grid,
     """
-    img = _as_ras(load_mgz(img_path))
-    conform_ref = _build_fs_conform_reference(img)
-    img_conform = _resample_image_to_reference(img, conform_ref, is_labels=False)
-    data = img_conform.get_fdata(dtype=np.float32)
-    fixed, _ = _center_crop_or_pad_3d(data, TARGET_SHAPE, pad_value=0.0, safe=safe, affine=img.affine)
-    return torch.from_numpy(np.asarray(fixed, dtype=np.float32))
+    run_mri_convert(img_path, out_path)
+    img = _as_ras(load_mgz(out_path))
+    data = img.get_fdata(dtype=np.float32)
+    return torch.from_numpy(data)

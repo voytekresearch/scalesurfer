@@ -11,7 +11,7 @@ def auto_discover_pairs(root=Path("tensors")):
 
     x_files, y_files = [], []
     for sub in sorted([p for p in root.rglob("*") if p.is_dir()]):
-        x = sub / "rawavg.pt"
+        x = sub / "orig.pt"
         y = sub / "aparc+aseg.pt"
         if x.exists() and y.exists():
             x_files.append(str(x))

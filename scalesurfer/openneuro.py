@@ -104,12 +104,10 @@ class AparcFsInputPair:
 
     orig_keys: tuple[str, ...]
     raw_keys: tuple[str, ...]
-    rawavg_keys: tuple[str, ...]
     numbered_mgz_keys: tuple[str, ...]
 
     preferred_orig_key: Optional[str]
     preferred_raw_key: Optional[str]
-    preferred_rawavg_key: Optional[str]
     preferred_numbered_mgz_key: Optional[str]
 
 
@@ -179,10 +177,6 @@ class OpenNeuroIndex:
     @staticmethod
     def _is_raw_mgz(key: str) -> bool:
         return OpenNeuroIndex._basename(key).lower() == "raw.mgz"
-
-    @staticmethod
-    def _is_rawavg_mgz(key: str) -> bool:
-        return OpenNeuroIndex._basename(key).lower() == "rawavg.mgz"
 
     @staticmethod
     def _is_numbered_mgz(key: str) -> bool:
@@ -288,9 +282,6 @@ class OpenNeuroIndex:
     def list_raw_mgz(self) -> list[OpenNeuroObject]:
         return [obj for obj in self.objects if self._is_raw_mgz(obj.key)]
 
-    def list_rawavg_mgz(self) -> list[OpenNeuroObject]:
-        return [obj for obj in self.objects if self._is_rawavg_mgz(obj.key)]
-
     def list_numbered_mgz(self) -> list[OpenNeuroObject]:
         return [obj for obj in self.objects if self._is_numbered_mgz(obj.key)]
 
@@ -340,15 +331,13 @@ class OpenNeuroIndex:
             if root is None:
                 continue
 
-            bucket = index.setdefault(root, {"orig": [], "raw": [], "rawavg": [], "numbered": []})
+            bucket = index.setdefault(root, {"orig": [], "raw": [], "numbered": []})
 
             key = obj.key
             if self._is_orig_mgz(key):
                 bucket["orig"].append(key)
             if self._is_raw_mgz(key):
                 bucket["raw"].append(key)
-            if self._is_rawavg_mgz(key):
-                bucket["rawavg"].append(key)
             if self._is_numbered_mgz(key):
                 bucket["numbered"].append(key)
 
@@ -367,11 +356,10 @@ class OpenNeuroIndex:
 
         for obj in aparc_files:
             fs_subject_root = self._fs_subject_root_from_aparc(obj.key)
-            files = fs_index.get(fs_subject_root, {"orig": [], "raw": [], "rawavg": [], "numbered": []})
+            files = fs_index.get(fs_subject_root, {"orig": [], "raw": [], "numbered": []})
 
             orig_keys = files["orig"]
             raw_keys = files["raw"]
-            rawavg_keys = files["rawavg"]
             numbered_mgz_keys = files["numbered"]
 
             out.append(
@@ -383,11 +371,9 @@ class OpenNeuroIndex:
                     fs_subject_root=fs_subject_root,
                     orig_keys=tuple(orig_keys),
                     raw_keys=tuple(raw_keys),
-                    rawavg_keys=tuple(rawavg_keys),
                     numbered_mgz_keys=tuple(numbered_mgz_keys),
                     preferred_orig_key=self._select_unique(orig_keys),
                     preferred_raw_key=self._select_unique(raw_keys),
-                    preferred_rawavg_key=self._select_unique(rawavg_keys),
                     preferred_numbered_mgz_key=self._select_preferred_numbered_mgz(numbered_mgz_keys),
                 )
             )
@@ -574,7 +560,7 @@ def _download_task(
 def fetch_openneuro_files(
     pairs: Sequence[Any],
     out_root: str | Path,
-    which: Sequence[str] = ("aparc_key", "preferred_rawavg_key"),
+    which: Sequence[str] = ("aparc_key", "preferred_orig_key"),
     *,
     preserve_s3_path: bool = True,
     deduplicate_keys: bool = True,
@@ -937,7 +923,7 @@ def build_fs_file_map_from_cache(root_dir: str | Path = "openneuro_cache") -> di
         name = s[-1].split(".")[0]
 
         if k not in file_map:
-            file_map[k] = {"rawavg": None, "aparc+aseg": None}
+            file_map[k] = {"orig": None, "aparc+aseg": None}
 
         file_map[k][name] = f
     return file_map
@@ -958,10 +944,10 @@ def extend_file_map_with_hcp(file_map: dict[str, dict[str, str | None]], hcp_roo
         name = s[-1].split(".")[0]
 
         if k not in out:
-            out[k] = {"rawavg": None, "aparc+aseg": None}
+            out[k] = {"orig": None, "aparc+aseg": None}
 
         if name == "T1w_acpc_dc_restore":
-            name = "rawavg"
+            name = "orig"
         out[k][name] = f
 
     return out
@@ -970,10 +956,10 @@ def extend_file_map_with_hcp(file_map: dict[str, dict[str, str | None]], hcp_roo
 def filter_complete_file_map(file_map: dict[str, dict[str, str | None]]) -> dict[str, dict[str, str]]:
     out: dict[str, dict[str, str]] = {}
     for k, v in file_map.items():
-        rawavg = v.get("rawavg")
+        orig = v.get("orig")
         aparc = v.get("aparc+aseg")
-        if rawavg is not None and aparc is not None:
-            out[k] = {"rawavg": str(rawavg), "aparc+aseg": str(aparc)}
+        if orig is not None and aparc is not None:
+            out[k] = {"orig": str(orig), "aparc+aseg": str(aparc)}
     return out
 
 

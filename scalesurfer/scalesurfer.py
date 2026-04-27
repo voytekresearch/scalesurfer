@@ -1,7 +1,7 @@
 """High-level API for interacting with models."""
 from pathlib import Path
 from joblib import Parallel, delayed
-
+from math import ceil
 import numpy as np
 import torch
 from tqdm.auto import tqdm
@@ -10,8 +10,7 @@ from scalesurfer.config import DEVICE, MODULE_PATH
 import nibabel as nib
 from nibabel.processing import resample_from_to
 
-from scalesurfer.convert import MNI_AFFINE, prepare_image, _build_fs_conform_reference
-from scalesurfer.surface.cortex_ode import _mni_tensor_to_conform
+from scalesurfer.convert import MNI_AFFINE, prepare_image
 from scalesurfer.data import (
     build_label_lut,
     default_aparc_aseg_label_values,
@@ -29,32 +28,30 @@ from scalesurfer.volume.model import TransUNet3D
 class ScaleSurfer:
 
     def __init__(
-            self,
-            anat_files,
-            subjects,
-            subject_dir,
-            *,
-            in_memory=False,
-            n_jobs=1,
-            fs_version=8,
-            device=None,
-            progress=True,
-            pretrained_data_name="adni",
-        ):
+        self,
+        anat_files,
+        subjects,
+        subject_dir,
+        *,
+        batch_size=1,
+        n_jobs_cpu=1,
+        fs_version=8,
+        device=None,
+        progress=True,
+        pretrained_data_name="adni",
+    ):
         """
         Initilize object.
 
         Parameters
         ----------
-        # todo: doc
-
-        TODO: implement an efficient batch_size.
         """
 
         self.anat_files = anat_files
         self.subjects = subjects
         self.subject_dir = Path(subject_dir)
-        self.n_jobs = n_jobs
+        self.batch_size =  batch_size
+        self.n_jobs = n_jobs_cpu
         self.fs_version = fs_version
         self.pretrained_data_name = pretrained_data_name
 
@@ -69,9 +66,9 @@ class ScaleSurfer:
         assert len(anat_files) == len(subjects), "anat_files and subjects must have the same length"
         self.prepare_directories()
         self._tqdm = tqdm if progress else lambda i: i # todo fix this is progress is False
-        self.in_memory = in_memory
 
 
+    # Model loaders
     @property
     def model_volume(self):
         """Lazy load volumetric model."""
@@ -112,7 +109,7 @@ class ScaleSurfer:
             self._model_surface_bundles = load_pretrained_model_bundles(config=self.surface_config)
         return self._model_surface_bundles
 
-
+    # Preprocessing
     def prepare_directories(self):
         """Create FreeSurfer-style directory structure."""
         # base dir
@@ -128,52 +125,46 @@ class ScaleSurfer:
 
 
     def _prepare_image(self, subject, anat_file, subject_dir):
-        out_file = subject_dir / subject / "mri" / "rawavg.pt"
-        if not out_file.exists():
-            img_tensor = prepare_image(anat_file).to(DEVICE)
-            torch.save(img_tensor, out_file)
-        elif self.in_memory:
-            img_tensor = torch.load(out_file)
-
-        if self.in_memory:
-            return img_tensor
-        else:
-            return None
+        out_file = subject_dir / subject / "mri" / "orig.pt"
+        img_tensor = prepare_image(anat_file, subject_dir / subject / "mri" / "orig.mgz").to(DEVICE)
+        torch.save(img_tensor, out_file)
 
 
     def prepare_images(self):
-        img_tensors = Parallel(n_jobs=self.n_jobs)(
+        Parallel(n_jobs=self.batch_size)(
             delayed(self._prepare_image)(subject, anat_file, self.subject_dir)
             for subject, anat_file in tqdm(
                 zip(self.subjects, self.anat_files),
                 total=len(self.subjects),
-                desc="Converting niftis to tensors"
+                desc="Conforming images"
             )
         )
-        if self.in_memory:
-            self._img_tensors = torch.stack(img_tensors) # [B, 1, D, H, W]
 
-
+    # Torch models
     def _predict_volume(self, x):
-        """Predict single aparc+aseg."""
-        aparc_aseg_pred = predict_volume_from_unpadded(
-            model=self.model_volume,
-            x_3d=x,
-            patch_size=(16, 16, 16),
-            device=self.device,
-        )
+        """Predict aparc+aseg volumes."""
+        aparc_aseg_pred = self.model_volume.predict_volume(x.unsqueeze(1))
         return aparc_aseg_pred
 
 
     def predict_volumes(self):
         """Predict aparc+aseg for all subject and save."""
-        for subj in self._tqdm(self.subjects, desc="Predicting volumes"):
-            if not self.in_memory:
-                x = torch.load(self.subject_dir / subj / "mri"/ "rawavg.pt")
-            else:
-                x = self._img_tensors[self.subjects.index(subj)]
-            aparc_aseg_pred = self._predict_volume(x)
-            torch.save(aparc_aseg_pred, self.subject_dir / subj / "mri" / "aparc+aseg.pt")
+        for idx in self._tqdm(
+            range(0, len(self.subjects), self.batch_size),
+            total=ceil(len(self.subjects) / self.batch_size),
+            desc="Predicting volumes"
+        ):
+            # Construct orig tensor
+            X = torch.zeros((self.batch_size, 256, 256, 256), dtype=torch.float32, device=self.device)
+            for i, isub in enumerate(range(idx, idx+self.batch_size)):
+                X[i] = torch.load(self.subject_dir / self.subjects[isub] / "mri"/ "orig.pt")
+
+            # Predict
+            aparc_aseg_pred = self._predict_volume(X)
+
+            # Write
+            for i, isub in enumerate(range(idx, idx+self.batch_size)):
+                torch.save(aparc_aseg_pred[i], self.subject_dir / self.subjects[isub] / "mri" / "aparc+aseg.pt")
 
 
     def _predict_surface(self, subject, aparc_fs_np):
@@ -197,10 +188,6 @@ class ScaleSurfer:
             if torch.is_tensor(aparc_fs):
                 aparc_fs = aparc_fs.detach().cpu().numpy()
             aparc_fs_np = np.asarray(aparc_fs, dtype=np.int32)
-            # aparc_fs_np is MNI space (197×233×189); pad to 256³ so CortexODE
-            # process_volume crop indices and process_surface_inverse math are correct.
-            aparc_conform = np.asarray(np.rint(_mni_tensor_to_conform(aparc_fs_np)), dtype=np.int32)
-
-            result = self._predict_surface(subj, aparc_conform)
+            result = self._predict_surface(subj, aparc_fs_np)
             pred_surfaces = result["surfaces"]
             save_surfaces_to_subject_dir(pred_surfaces, self.subject_dir / subj / "surf")

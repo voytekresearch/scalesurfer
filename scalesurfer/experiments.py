@@ -308,7 +308,7 @@ def discover_gcloud_file_map(gcloud_root: str | Path) -> tuple[dict[str, dict[st
     Build convert.py file_map from gcloud FreeSurfer outputs.
 
     Keys are normalized to '<subject_token>/mri' so outputs become:
-      tensors_gcloud/<subject_token>/mri/{rawavg.pt, aparc+aseg.pt}
+      tensors_gcloud/<subject_token>/mri/{orig.pt, aparc+aseg.pt}
     """
     root = Path(gcloud_root)
     aparc_files = sorted(root.rglob("aparc+aseg.mgz"))
@@ -318,8 +318,8 @@ def discover_gcloud_file_map(gcloud_root: str | Path) -> tuple[dict[str, dict[st
     used_keys: set[str] = set()
 
     for aparc in aparc_files:
-        raw = aparc.with_name("rawavg.mgz")
-        if not raw.exists():
+        orig = aparc.with_name("orig.mgz")
+        if not orig.exists():
             missing_raw.append(str(aparc))
             continue
 
@@ -333,7 +333,7 @@ def discover_gcloud_file_map(gcloud_root: str | Path) -> tuple[dict[str, dict[st
         used_keys.add(key)
 
         file_map[key] = {
-            "rawavg": str(raw),
+            "orig": str(orig),
             "aparc+aseg": str(aparc),
         }
 

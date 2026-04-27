@@ -1245,22 +1245,22 @@ def _preprocess_cache_tag(patch_size, apply_zscore, label_lut):
     return f"pp_v1|ps={ps}|zs={int(bool(apply_zscore))}|lut={lut_sig}"
 
 
-def _pair_digest(rawavg_path, aparc_path, cache_tag):
-    key = f"{Path(rawavg_path).resolve()}|{Path(aparc_path).resolve()}|{cache_tag}"
+def _pair_digest(orig_path, aparc_path, cache_tag):
+    key = f"{Path(orig_path).resolve()}|{Path(aparc_path).resolve()}|{cache_tag}"
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:20]
 
 
 def discover_valid_mgz_pairs(mgz_root, expected_valid_pairs=None):
     root = Path(mgz_root).expanduser().resolve()
-    raw_paths = sorted(root.rglob("rawavg.mgz"))
+    raw_paths = sorted(root.rglob("orig.mgz"))
     aparc_paths = sorted(root.rglob("aparc+aseg.mgz"))
 
     valid_pairs = []
     missing_raw_for_aparc = []
     for aparc_path in aparc_paths:
-        rawavg_path = aparc_path.with_name("rawavg.mgz")
-        if rawavg_path.exists():
-            valid_pairs.append((rawavg_path, aparc_path))
+        orig_path = aparc_path.with_name("orig.mgz")
+        if orig_path.exists():
+            valid_pairs.append((orig_path, aparc_path))
         else:
             missing_raw_for_aparc.append(aparc_path)
 
@@ -1272,7 +1272,7 @@ def discover_valid_mgz_pairs(mgz_root, expected_valid_pairs=None):
     inventory_df = pd.DataFrame(
         {
             "mgz_root": [str(root)],
-            "rawavg_files": [int(len(raw_paths))],
+            "orig_files": [int(len(raw_paths))],
             "aparc_files": [int(len(aparc_paths))],
             "valid_pairs": [int(len(valid_pairs))],
             "missing_raw_for_aparc": [int(len(missing_raw_for_aparc))],
@@ -1281,7 +1281,7 @@ def discover_valid_mgz_pairs(mgz_root, expected_valid_pairs=None):
     return valid_pairs, inventory_df, missing_raw_for_aparc
 
 
-def preprocess_mgz_pair_to_padded_tensors(rawavg_path, aparc_path, label_lut, apply_zscore, patch_size):
+def preprocess_mgz_pair_to_padded_tensors(orig_path, aparc_path, label_lut, apply_zscore, patch_size):
     """
     Convert mgz pair -> padded tensors using the module conversion/preprocess path.
 
@@ -1293,7 +1293,7 @@ def preprocess_mgz_pair_to_padded_tensors(rawavg_path, aparc_path, label_lut, ap
     from convert import prepare_arrays_if_needed
     from .data import collate_pad_to_patch
 
-    x_arr, y_arr = prepare_arrays_if_needed(rawavg_path, aparc_path)
+    x_arr, y_arr = prepare_arrays_if_needed(orig_path, aparc_path)
 
     x = torch.from_numpy(np.asarray(x_arr, dtype=np.float32))
     y = torch.from_numpy(np.asarray(y_arr, dtype=np.int64))
@@ -1342,8 +1342,8 @@ def build_mgz_preprocess_cache(
     reused = 0
 
     pbar = tqdm(valid_pairs, desc="mgz preprocess cache", leave=False)
-    for rawavg_path, aparc_path in pbar:
-        digest = _pair_digest(rawavg_path, aparc_path, cache_tag=cache_tag)
+    for orig_path, aparc_path in pbar:
+        digest = _pair_digest(orig_path, aparc_path, cache_tag=cache_tag)
         x_cache = cache_dir / f"{digest}.x.pt"
         y_cache = cache_dir / f"{digest}.y.pt"
 
@@ -1351,7 +1351,7 @@ def build_mgz_preprocess_cache(
             reused += 1
         else:
             x_pad, y_pad = preprocess_mgz_pair_to_padded_tensors(
-                rawavg_path=rawavg_path,
+                orig_path=orig_path,
                 aparc_path=aparc_path,
                 label_lut=label_lut,
                 apply_zscore=apply_zscore,
@@ -1363,7 +1363,7 @@ def build_mgz_preprocess_cache(
 
         rows.append(
             {
-                "rawavg_path": str(rawavg_path),
+                "orig_path": str(orig_path),
                 "aparc_path": str(aparc_path),
                 "x_cache_path": str(x_cache),
                 "y_cache_path": str(y_cache),
@@ -1471,7 +1471,7 @@ def evaluate_mgz_throughput_cached(
     )
     if missing_raw_for_aparc:
         raise RuntimeError(
-            f"Found aparc files without sibling rawavg.mgz: {len(missing_raw_for_aparc)}"
+            f"Found aparc files without sibling orig.mgz: {len(missing_raw_for_aparc)}"
         )
 
     n_classes = int(torch.as_tensor(class_values).numel())
@@ -1526,10 +1526,10 @@ def evaluate_mgz_throughput_cached(
         )
     else:
         rows = []
-        for rawavg_path, aparc_path in valid_pairs:
+        for orig_path, aparc_path in valid_pairs:
             rows.append(
                 {
-                    "rawavg_path": str(rawavg_path),
+                    "orig_path": str(orig_path),
                     "aparc_path": str(aparc_path),
                     "x_cache_path": None,
                     "y_cache_path": None,
@@ -1572,7 +1572,7 @@ def evaluate_mgz_throughput_cached(
 
     pbar = tqdm(cache_index_df.itertuples(index=False), total=len(cache_index_df), desc="throughput cached eval", leave=False)
     for sample_idx, row in enumerate(pbar):
-        rawavg_path = Path(row.rawavg_path)
+        orig_path = Path(row.orig_path)
         aparc_path = Path(row.aparc_path)
 
         t0 = perf_counter()
@@ -1582,7 +1582,7 @@ def evaluate_mgz_throughput_cached(
             )
         else:
             x_pad, y_pad = preprocess_mgz_pair_to_padded_tensors(
-                rawavg_path=rawavg_path,
+                orig_path=orig_path,
                 aparc_path=aparc_path,
                 label_lut=label_lut,
                 apply_zscore=apply_zscore,
@@ -1642,9 +1642,9 @@ def evaluate_mgz_throughput_cached(
             {
                 "sample_idx": int(sample_idx),
                 "method": "model",
-                "study": rawavg_path.parts[-4] if len(rawavg_path.parts) >= 4 else "unknown",
-                "subject": rawavg_path.parts[-3] if len(rawavg_path.parts) >= 3 else rawavg_path.parent.name,
-                "rawavg_path": str(rawavg_path),
+                "study": orig_path.parts[-4] if len(orig_path.parts) >= 4 else "unknown",
+                "subject": orig_path.parts[-3] if len(orig_path.parts) >= 3 else orig_path.parent.name,
+                "orig_path": str(orig_path),
                 "aparc_path": str(aparc_path),
                 "mean_dice_fg": mean_dice_fg,
                 "dice_csf": tissue_dice.get("dice_csf", np.nan),
@@ -1668,9 +1668,9 @@ def evaluate_mgz_throughput_cached(
         loss_rows.append(
             {
                 "sample_idx": int(sample_idx),
-                "study": rawavg_path.parts[-4] if len(rawavg_path.parts) >= 4 else "unknown",
-                "subject": rawavg_path.parts[-3] if len(rawavg_path.parts) >= 3 else rawavg_path.parent.name,
-                "rawavg_path": str(rawavg_path),
+                "study": orig_path.parts[-4] if len(orig_path.parts) >= 4 else "unknown",
+                "subject": orig_path.parts[-3] if len(orig_path.parts) >= 3 else orig_path.parent.name,
+                "orig_path": str(orig_path),
                 "aparc_path": str(aparc_path),
                 "loss": float(loss.detach().item()),
                 "n_voxels": n_vox,

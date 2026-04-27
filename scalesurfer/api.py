@@ -343,7 +343,7 @@ def prepare_loaders(
     """Return `(train_loader, val_loader, test_loader)`.
 
     `data_root_or_cfg` may be:
-    - `str` / `Path`: tensor root containing `rawavg.pt` and `aparc+aseg.pt`
+    - `str` / `Path`: tensor root containing `orig.pt` and `aparc+aseg.pt`
     - `dict`: full data config for `prepare_data_pipeline`
     - `None`: use the default data config
     If `from_dense_labels=True`, decode dense target labels back to FreeSurfer ids.

@@ -32,7 +32,7 @@ SURFACE_PT_FILE_MAP = {
     "rh.pial": "rh.pial.pt",
 }
 TARGET_PT_FILE_MAP = {
-    "rawavg": "rawavg.pt",
+    "orig": "orig.pt",
     "aparc+aseg": "aparc+aseg.pt",
     "aseg_presurf": "aseg.presurf.pt",
     "brainmask": "brainmask.pt",
@@ -243,7 +243,7 @@ def _resample_to_reference(
 def _tensor_reference_image(subject_dir: str | Path) -> nib.spatialimages.SpatialImage:
     subject_dir = Path(subject_dir)
     _, aparc_out = prepare_images_if_needed(
-        subject_dir / "mri" / "rawavg.mgz",
+        subject_dir / "mri" / "orig.mgz",
         subject_dir / "mri" / "aparc+aseg.mgz",
     )
     return aparc_out
