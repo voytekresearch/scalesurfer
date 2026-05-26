@@ -30,6 +30,7 @@ from scalesurfer.volume.model import TransUNet3D
 
 _VOLUME_MODEL_FILENAME = "transunet3d.safetensors"
 _VOLUME_MODEL_ROOT = MODULE_PATH.parent / "docs" / "notebooks" / "huggingface"
+_DEFAULT_VOLUME_HF_NAMESPACE = "rphammonds"
 _VOLUME_MODEL_CONFIG = {
     "n_classes": 118,
     "in_channels": 1,
@@ -96,7 +97,7 @@ def _normalize_fs_version(fs_version) -> int:
 
 
 def _volume_hf_repo_id(repo_name: str) -> str:
-    namespace = os.environ.get("SCALESURFER_HF_NAMESPACE", "").strip().strip("/")
+    namespace = os.environ.get("SCALESURFER_HF_NAMESPACE", _DEFAULT_VOLUME_HF_NAMESPACE).strip().strip("/")
     return f"{namespace}/{repo_name}" if namespace else repo_name
 
 
