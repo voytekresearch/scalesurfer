@@ -4,7 +4,6 @@ import os
 import shlex
 import shutil
 import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -174,6 +173,7 @@ class TailConfig:
     link_mode: str
     dry_run: bool
     force: bool
+    verbose: bool
     run_autorecon1: bool
     input_t1: Path | None
     stages: tuple[str, ...]
@@ -210,6 +210,11 @@ class CommandRunner:
         self.log_path = config.subject.scripts_dir / "predicted.log"
         self.cmd_path = config.subject.scripts_dir / "predicted.cmd"
 
+    def log(self, msg: str) -> None:
+        self.config.subject.scripts_dir.mkdir(parents=True, exist_ok=True)
+        with self.log_path.open("a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+
     def _script_prelude(self, cwd: Path) -> list[str]:
         cfg = self.config
         lines = [
@@ -238,13 +243,15 @@ class CommandRunner:
     ) -> None:
         outputs = [Path(x) for x in (outputs or ())]
         if outputs and not self.config.force and all(path.exists() for path in outputs):
-            print(f"[skip] {description}", file=sys.stderr)
+            if self.config.verbose:
+                self.log(f"[skip] {description}")
             return
 
         argv = [str(x) for x in args]
         command_str = shlex.join(argv)
-        print(f"[run] {description}", file=sys.stderr)
-        print(command_str, file=sys.stderr)
+        if self.config.verbose:
+            self.log(f"[run] {description}")
+            self.log(command_str)
 
         if self.config.dry_run:
             return
@@ -365,15 +372,6 @@ def install_file(src: Path, dst: Path, *, link_mode: str, force: bool) -> None:
         shutil.copy2(src, dst)
     else:
         raise ValueError(f"Unsupported link mode: {link_mode}")
-
-
-def maybe_symlink(target: Path, link_path: Path, *, force: bool) -> None:
-    if link_path.exists() or link_path.is_symlink():
-        if not force:
-            return
-        _remove_existing(link_path)
-    link_path.parent.mkdir(parents=True, exist_ok=True)
-    link_path.symlink_to(target.name)
 
 
 def _normalized_path(path: Path) -> Path:
@@ -510,7 +508,7 @@ def maybe_run_autorecon1(config: TailConfig, runner: CommandRunner) -> None:
     orig = subject.mri_dir / "orig.mgz"
 
     if not config.force and orig_001.exists() and rawavg.exists() and orig.exists():
-        print("[skip] autorecon1 already present", file=sys.stderr)
+        runner.log("[skip] autorecon1 already present")
         return
 
     if config.input_t1 is None:
@@ -537,7 +535,7 @@ def maybe_run_autorecon1(config: TailConfig, runner: CommandRunner) -> None:
     )
 
 
-def install_prediction_bundle(config: TailConfig) -> None:
+def install_prediction_bundle(config: TailConfig, runner: "CommandRunner | None" = None) -> None:
     subject = config.subject
     bundle = config.bundle
 
@@ -561,19 +559,14 @@ def install_prediction_bundle(config: TailConfig) -> None:
     ]
 
     if config.dry_run:
+        _log = runner.log if runner is not None else lambda m: None
         for src, dst in installs:
-            print(f"[install] {src} -> {dst}", file=sys.stderr)
+            _log(f"[install] {src} -> {dst}")
         for src, dst in optional_installs:
             if src is not None:
-                print(f"[install] {src} -> {dst}", file=sys.stderr)
-        print(
-            f"[install] {subject.surf_dir / 'lh.pial'} -> {subject.surf_dir / 'lh.pial.T1'} (symlink)",
-            file=sys.stderr,
-        )
-        print(
-            f"[install] {subject.surf_dir / 'rh.pial'} -> {subject.surf_dir / 'rh.pial.T1'} (symlink)",
-            file=sys.stderr,
-        )
+                _log(f"[install] {src} -> {dst}")
+        _log(f"[install] {subject.surf_dir / 'lh.pial'} -> {subject.surf_dir / 'lh.pial.T1'} ({config.link_mode})")
+        _log(f"[install] {subject.surf_dir / 'rh.pial'} -> {subject.surf_dir / 'rh.pial.T1'} ({config.link_mode})")
         return
 
     for src, dst in installs:
@@ -582,8 +575,18 @@ def install_prediction_bundle(config: TailConfig) -> None:
         if src is not None:
             install_file(src, dst, link_mode=config.link_mode, force=config.force)
 
-    maybe_symlink(subject.surf_dir / "lh.pial", subject.surf_dir / "lh.pial.T1", force=config.force)
-    maybe_symlink(subject.surf_dir / "rh.pial", subject.surf_dir / "rh.pial.T1", force=config.force)
+    install_file(
+        subject.surf_dir / "lh.pial",
+        subject.surf_dir / "lh.pial.T1",
+        link_mode=config.link_mode,
+        force=config.force,
+    )
+    install_file(
+        subject.surf_dir / "rh.pial",
+        subject.surf_dir / "rh.pial.T1",
+        link_mode=config.link_mode,
+        force=config.force,
+    )
 
 
 def require_paths(paths: Iterable[Path], *, message: str, planned: Iterable[Path] = ()) -> None:
@@ -622,6 +625,8 @@ def build_annotation_stage(config: TailConfig, runner: CommandRunner) -> None:
     for hemi in HEMIS:
         annot = subject.label_dir / f"{hemi}.aparc.annot"
         surfseg = subject.surf_dir / f"{hemi}.aparc.bootstrap.mgh"
+        cortex_label = subject.label_dir / f"{hemi}.cortex.label"
+
         if config.force or not path_available(annot, planned=planned):
             runner.maybe_run(
                 [
@@ -664,7 +669,6 @@ def build_annotation_stage(config: TailConfig, runner: CommandRunner) -> None:
                 description=f"{hemi} bootstrap annotation",
             )
 
-        cortex_label = subject.label_dir / f"{hemi}.cortex.label"
         if config.force or not path_available(cortex_label, planned=planned):
             runner.maybe_run(
                 ["make_cortex_label", "--s", subject.subject_id, f"--{hemi}"],
@@ -1069,7 +1073,6 @@ def _aparc_aseg_stats_command(config: TailConfig, *, planned: Iterable[Path] = (
 def ensure_aparc_stats_ctab(config: TailConfig) -> Path:
     subject_ctab = config.subject.label_dir / "aparc.annot.ctab"
     if config.dry_run:
-        print(f"[install] {config.annot_ctab} -> {subject_ctab}", file=sys.stderr)
         return subject_ctab
     if subject_ctab.exists() and not config.force:
         return subject_ctab
@@ -1211,6 +1214,7 @@ def build_config(
     link_mode: str = "symlink",
     dry_run: bool = False,
     force: bool = False,
+    verbose: bool = True,
     run_autorecon1: bool = False,
     input_t1: str | Path | None = None,
     stages: Iterable[str] | None = None,
@@ -1245,6 +1249,7 @@ def build_config(
         link_mode=str(link_mode),
         dry_run=bool(dry_run),
         force=bool(force),
+        verbose=bool(verbose),
         run_autorecon1=bool(run_autorecon1),
         input_t1=resolved_input_t1,
         stages=stage_tuple,
@@ -1260,7 +1265,7 @@ def run(config: TailConfig) -> None:
     runner = CommandRunner(config)
 
     maybe_run_autorecon1(config, runner)
-    install_prediction_bundle(config)
+    install_prediction_bundle(config, runner)
 
     if "annot" in config.stages:
         build_annotation_stage(config, runner)

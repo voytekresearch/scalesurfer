@@ -612,10 +612,12 @@ def load_freesurfer_lut(fs_lut_path):
 def save_surfaces_to_subject_dir(
     surfaces: dict[str, dict[str, np.ndarray]],
     out_dir: str | Path,
+    volume_info: dict | None = None,
 ) -> dict[str, Path]:
     """
     Write predicted surfaces as FreeSurfer binary surface files.
     surfaces: dict of surface_name → {"vertices_ras": [N,3], "faces": [F,3]}
+    volume_info: FreeSurfer volume metadata (vox2ras, vox2ras_tkr, etc.) from orig.mgz.
     Returns dict: surface_name → written path.
     """
     out_dir = Path(out_dir)
@@ -632,6 +634,9 @@ def save_surfaces_to_subject_dir(
         # for CortexVol = PialVol - WhiteVol to be positive. Flip face winding.
         faces = np.ascontiguousarray(faces[:, [0, 2, 1]])
         out_path = out_dir / name
-        write_geometry(str(out_path), verts, faces)
+        if volume_info is not None:
+            write_geometry(str(out_path), verts, faces, volume_info=volume_info)
+        else:
+            write_geometry(str(out_path), verts, faces)
         paths[name] = out_path
     return paths
