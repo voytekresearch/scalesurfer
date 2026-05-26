@@ -1,4 +1,5 @@
 """High-level API for interacting with models."""
+import os
 from time import time
 from pathlib import Path
 from joblib import Parallel, delayed
@@ -27,6 +28,133 @@ from scalesurfer.volume import fs as _fs
 from scalesurfer.volume.model import TransUNet3D
 
 
+_VOLUME_MODEL_FILENAME = "transunet3d.safetensors"
+_VOLUME_MODEL_ROOT = MODULE_PATH.parent / "docs" / "notebooks" / "huggingface"
+_VOLUME_MODEL_CONFIG = {
+    "n_classes": 118,
+    "in_channels": 1,
+    "base_shape": (208, 240, 192),
+    "patch_size": (16, 16, 16),
+    "channels": (12, 20, 32, 48, 64, 96),
+    "transformer_depth": 2,
+    "n_heads": 4,
+    "dropout": 0.0,
+    "positional_encoding": "sincos",
+    "task_type": "classification",
+}
+_VOLUME_MODEL_SPECS = {
+    5: {
+        "repo_name": "scalesurfer-v5",
+        "checkpoint_dir": MODULE_PATH.parent
+        / "docs"
+        / "notebooks"
+        / "checkpoints_fsv5"
+        / "fsv5_20260402_015649",
+    },
+    6: {
+        "repo_name": "scalesurfer-v6",
+        "checkpoint_dir": MODULE_PATH.parent
+        / "docs"
+        / "notebooks"
+        / "checkpoints_fsv6"
+        / "fsv6_20260402_021927",
+    },
+    7: {
+        "repo_name": "scalesurfer-v7",
+        "checkpoint_dir": MODULE_PATH.parent
+        / "docs"
+        / "notebooks"
+        / "checkpoints_fsv7"
+        / "fsv7_20260402_031018",
+    },
+    8: {
+        "repo_name": "scalesurfer-v8",
+        "checkpoint_dir": MODULE_PATH.parent
+        / "docs"
+        / "notebooks"
+        / "checkpoints_fsv8"
+        / "fsv8_20260413_164217",
+    },
+}
+
+
+def _normalize_fs_version(fs_version) -> int:
+    version = str(fs_version).strip().lower()
+    for prefix in ("fsv", "fs", "v"):
+        if version.startswith(prefix):
+            version = version[len(prefix) :]
+            break
+    version = version.split(".", 1)[0]
+    try:
+        normalized = int(version)
+    except ValueError as exc:
+        raise ValueError(f"Unsupported fs_version {fs_version!r}; expected one of {sorted(_VOLUME_MODEL_SPECS)}") from exc
+
+    if normalized not in _VOLUME_MODEL_SPECS:
+        raise ValueError(f"Unsupported fs_version {fs_version!r}; expected one of {sorted(_VOLUME_MODEL_SPECS)}")
+    return normalized
+
+
+def _volume_hf_repo_id(repo_name: str) -> str:
+    namespace = os.environ.get("SCALESURFER_HF_NAMESPACE", "").strip().strip("/")
+    return f"{namespace}/{repo_name}" if namespace else repo_name
+
+
+def _candidate_volume_checkpoint_paths(spec: dict) -> list[Path]:
+    paths = []
+    model_root = os.environ.get("SCALESURFER_VOLUME_MODEL_DIR")
+    if model_root:
+        paths.append(Path(model_root).expanduser() / spec["repo_name"] / _VOLUME_MODEL_FILENAME)
+
+    paths.extend(
+        [
+            _VOLUME_MODEL_ROOT / spec["repo_name"] / _VOLUME_MODEL_FILENAME,
+            spec["checkpoint_dir"] / _VOLUME_MODEL_FILENAME,
+        ]
+    )
+    return paths
+
+
+def _download_volume_checkpoint(spec: dict) -> Path:
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError as exc:
+        raise ImportError(
+            "Install huggingface-hub to download ScaleSurfer volume checkpoints, "
+            "or set SCALESURFER_VOLUME_MODEL_DIR to a local model directory."
+        ) from exc
+
+    return Path(
+        hf_hub_download(
+            repo_id=_volume_hf_repo_id(spec["repo_name"]),
+            filename=_VOLUME_MODEL_FILENAME,
+            repo_type="model",
+        )
+    )
+
+
+def _resolve_volume_checkpoint_path(fs_version: int) -> Path:
+    spec = _VOLUME_MODEL_SPECS[fs_version]
+    for path in _candidate_volume_checkpoint_paths(spec):
+        if path.exists():
+            return path
+    return _download_volume_checkpoint(spec)
+
+
+def _load_volume_state_dict(path: Path) -> dict:
+    if path.suffix == ".safetensors":
+        try:
+            from safetensors.torch import load_file
+        except ImportError as exc:
+            raise ImportError("Install safetensors to load ScaleSurfer volume checkpoints.") from exc
+        return load_file(str(path), device="cpu")
+
+    ckpt = torch.load(path, map_location="cpu")
+    if not isinstance(ckpt, dict) or "model_state" not in ckpt:
+        raise ValueError(f"Checkpoint missing model_state: {path}")
+    return ckpt["model_state"]
+
+
 class ScaleSurfer:
 
     def __init__(
@@ -41,6 +169,7 @@ class ScaleSurfer:
         device=None,
         progress=True,
         pretrained_data_name="adni",
+        conform_backend="auto",
         overwrite=False,
         verbose=True,
     ):
@@ -56,8 +185,9 @@ class ScaleSurfer:
         self.subject_dir = Path(subject_dir)
         self.batch_size =  batch_size
         self.n_jobs = n_jobs_cpu
-        self.fs_version = fs_version
+        self.fs_version = _normalize_fs_version(fs_version)
         self.pretrained_data_name = pretrained_data_name
+        self.conform_backend = conform_backend
         self.overwrite = overwrite
         self.verbose = verbose
 
@@ -66,8 +196,7 @@ class ScaleSurfer:
         self._surface_config = None
         self.device = DEVICE if device is None else device
 
-        # todo: load based on fs_version kwarg
-        self.chkpt_path_volume = MODULE_PATH.parent / "docs" / "notebooks" / "checkpoints_fsv8" / "fsv8_20260413_164217" / "transunet3d_best.pt"
+        self.chkpt_path_volume = _resolve_volume_checkpoint_path(self.fs_version)
 
         assert len(anat_files) == len(subjects), "anat_files and subjects must have the same length"
         self.prepare_directories()
@@ -91,19 +220,8 @@ class ScaleSurfer:
     def model_volume(self):
         """Lazy load volumetric model."""
         if self._model_volume is None:
-            self._model_volume = TransUNet3D(
-                n_classes=118,
-                in_channels=1,
-                base_shape=(208, 240, 192),
-                patch_size=(16, 16, 16),
-                channels=(12, 20, 32, 48, 64, 96),
-                transformer_depth=2,
-                n_heads=4,
-                dropout=0.0,
-                positional_encoding="sincos",
-            )
-            ckpt = torch.load(self.chkpt_path_volume, map_location=self.device)
-            self._model_volume.load_state_dict(ckpt["model_state"])
+            self._model_volume = TransUNet3D(**_VOLUME_MODEL_CONFIG)
+            self._model_volume.load_state_dict(_load_volume_state_dict(self.chkpt_path_volume))
             self._model_volume.to(self.device)
             self._model_volume.eval()
         return self._model_volume
@@ -144,7 +262,11 @@ class ScaleSurfer:
 
     def _prepare_image(self, subject, anat_file, subject_dir):
         out_file = subject_dir / subject / "mri" / "orig.pt"
-        img_tensor = prepare_image(anat_file, subject_dir / subject / "mri" / "orig.mgz").to(DEVICE)
+        img_tensor = prepare_image(
+            anat_file,
+            subject_dir / subject / "mri" / "orig.mgz",
+            conform_backend=self.conform_backend,
+        ).to(DEVICE)
         torch.save(img_tensor, out_file)
 
 
@@ -196,6 +318,62 @@ class ScaleSurfer:
         self._empty_cache()
         if self.verbose:
             self._log_timing("predict_volumes", time() - t0)
+
+    def plot_volume(
+        self,
+        subject_id: str,
+        *,
+        draw_cross: bool = False,
+        colorbar: bool = False,
+        display_mode: str = "mosaic",
+        **plot_kwargs,
+    ):
+        """Plot a predicted aparc+aseg volume over the prepared orig image."""
+        from nilearn.plotting import plot_roi
+
+        subject_id = str(subject_id)
+        mri_dir = self.subject_dir / subject_id / "mri"
+        if not mri_dir.exists():
+            known = ", ".join(str(s) for s in self.subjects[:5])
+            suffix = "..." if len(self.subjects) > 5 else ""
+            raise ValueError(f"Unknown subject_id {subject_id!r}. Known subjects: {known}{suffix}")
+
+        orig_path = mri_dir / "orig.mgz"
+        x_path = mri_dir / "orig.pt"
+        y_path = mri_dir / "aparc+aseg.pt"
+        missing = [str(path) for path in (orig_path, x_path, y_path) if not path.exists()]
+        if missing:
+            raise FileNotFoundError("Missing required volume file(s): " + ", ".join(missing))
+
+        orig_img = nib.as_closest_canonical(nib.load(str(orig_path)))
+        x = torch.load(x_path, map_location="cpu")
+        y = torch.load(y_path, map_location="cpu")
+        if torch.is_tensor(x):
+            x = x.detach().cpu().numpy()
+        if torch.is_tensor(y):
+            y = y.detach().cpu().numpy()
+
+        x = np.asarray(x, dtype=np.float32)
+        y = np.asarray(y, dtype=np.float32)
+        if x.ndim == 4 and x.shape[0] == 1:
+            x = x[0]
+        if y.ndim == 4 and y.shape[0] == 1:
+            y = y[0]
+        if x.ndim != 3:
+            raise ValueError(f"{x_path} must contain a 3D volume, got shape {x.shape}")
+        if y.ndim != 3:
+            raise ValueError(f"{y_path} must contain a 3D volume, got shape {y.shape}")
+
+        bg_img = nib.Nifti1Image(x, affine=orig_img.affine)
+        roi_img = nib.Nifti1Image(y, affine=orig_img.affine)
+        return plot_roi(
+            roi_img,
+            bg_img,
+            draw_cross=draw_cross,
+            colorbar=colorbar,
+            display_mode=display_mode,
+            **plot_kwargs,
+        )
 
     def _predict_surface(self, subject, aparc_fs_np):
         """Predict lh/rh white and pial surfaces for a single subject."""

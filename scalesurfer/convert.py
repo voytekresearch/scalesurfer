@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
 import tempfile
-from pathlib import Path
 import shlex
 import subprocess
 from typing import Any
@@ -14,7 +14,7 @@ from typing import Tuple
 from nilearn.datasets import load_mni152_template
 import numpy as np
 import torch
-from nibabel.processing import resample_from_to
+from nibabel.processing import conform, resample_from_to
 from tqdm.contrib.concurrent import process_map
 from nilearn.image import resample_img
 
@@ -24,6 +24,7 @@ from nibabel.filebasedimages import ImageFileError
 TARGET_VOXEL_SIZE_MM = 1.0
 TARGET_SHAPE = (256, 256, 256)
 CONFORM_SHAPE = (256, 256, 256)  # FreeSurfer orig.mgz conformed grid
+CONFORM_UCHAR_HIGH_FRACTION = 0.999
 _GZIP_MAGIC = b"\x1f\x8b"
 
 MNI_SHAPE = (197, 233, 189)
@@ -554,9 +555,13 @@ def convert_file_map_to_pt(
     return results
 
 
-def run_mri_convert(img: str | Path, orig: str | Path, extra_args: str = "--conform") -> None:
-    cmd = f"mri_convert {img} {orig} {extra_args}"
-    args = shlex.split(cmd)
+def mri_convert_available() -> bool:
+    """Return True when FreeSurfer's mri_convert is on PATH."""
+    return shutil.which("mri_convert") is not None
+
+
+def _run_mri_convert_binary(img: str | Path, orig: str | Path, extra_args: str = "--conform") -> None:
+    args = ["mri_convert", str(img), str(orig), *shlex.split(extra_args)]
     subprocess.run(
         args,
         check=True,
@@ -565,13 +570,96 @@ def run_mri_convert(img: str | Path, orig: str | Path, extra_args: str = "--conf
         text=True,
     )
 
-def prepare_image(img_path: str | Path, out_path: str | Path) -> torch.Tensor:
-    """
-    Return a raw NIfTI as a float32 tensor ready for model inference.
 
-    Conforms to FreeSurfer's 256^3 1mm grid,
+def _scale_conformed_to_uint8(data: np.ndarray) -> np.ndarray:
+    """Approximate mri_convert --conform's uchar intensity conversion."""
+    data = np.asarray(data, dtype=np.float32)
+    finite = np.isfinite(data)
+    if not bool(finite.any()):
+        return np.zeros(data.shape, dtype=np.uint8)
+
+    lower = float(data[finite].min())
+    nonzero_finite = finite & (data != 0)
+    if bool(nonzero_finite.any()):
+        upper = float(np.quantile(data[nonzero_finite], CONFORM_UCHAR_HIGH_FRACTION))
+    else:
+        upper = float(data[finite].max())
+
+    if upper <= lower:
+        return np.zeros(data.shape, dtype=np.uint8)
+
+    scaled = (data - lower) * (255.0 / (upper - lower))
+    scaled = np.where(finite, scaled, 0.0)
+    scaled = np.clip(np.rint(scaled), 0.0, 255.0)
+    scaled[(data == 0) | (~finite)] = 0.0
+    return scaled.astype(np.uint8)
+
+
+def _zscore_volume_for_model(volume: torch.Tensor) -> torch.Tensor:
+    """Match the per-volume z-score used by the training cache."""
+    volume = volume.to(torch.float32)
+    return (volume - volume.mean()) / volume.std().clamp_min(1e-6)
+
+
+def run_nibabel_mri_convert_conform(img: str | Path, orig: str | Path) -> None:
+    """NiBabel replacement for the mri_convert --conform use in inference."""
+    in_img = load_mgz(img)
+    if len(in_img.shape) > 3:
+        data = np.asanyarray(in_img.dataobj)[..., 0]
+        in_img = nib.Nifti1Image(data, in_img.affine)
+
+    conformed = conform(
+        in_img,
+        out_shape=CONFORM_SHAPE,
+        voxel_size=(TARGET_VOXEL_SIZE_MM, TARGET_VOXEL_SIZE_MM, TARGET_VOXEL_SIZE_MM),
+        order=1,
+        orientation="RAS",
+    )
+    data = _scale_conformed_to_uint8(conformed.get_fdata(dtype=np.float32))
+    out_img = nib.MGHImage(data, conformed.affine)
+    orig = Path(orig)
+    orig.parent.mkdir(parents=True, exist_ok=True)
+    nib.save(out_img, str(orig))
+
+
+def run_mri_convert(
+    img: str | Path,
+    orig: str | Path,
+    extra_args: str = "--conform",
+    *,
+    backend: str = "auto",
+) -> str:
+    """Conform an image, using FreeSurfer when available or a NiBabel fallback."""
+    backend = str(backend).strip().lower()
+    if backend not in {"auto", "freesurfer", "nibabel"}:
+        raise ValueError("backend must be 'auto', 'freesurfer', or 'nibabel'")
+
+    if backend == "auto":
+        backend = "freesurfer" if mri_convert_available() else "nibabel"
+
+    if backend == "freesurfer":
+        _run_mri_convert_binary(img, orig, extra_args=extra_args)
+        return backend
+
+    if extra_args.strip() not in {"--conform", "-c"}:
+        raise ValueError("NiBabel mri_convert fallback only supports --conform")
+    run_nibabel_mri_convert_conform(img, orig)
+    return backend
+
+
+def prepare_image(
+    img_path: str | Path,
+    out_path: str | Path,
+    *,
+    conform_backend: str = "auto",
+) -> torch.Tensor:
     """
-    run_mri_convert(img_path, out_path)
+    Return a conformed, z-scored float32 tensor ready for model inference.
+
+    The saved MGZ stays in conformed intensity space; only the returned tensor
+    is z-scored to match the training cache.
+    """
+    run_mri_convert(img_path, out_path, backend=conform_backend)
     img = _as_ras(load_mgz(out_path))
     data = img.get_fdata(dtype=np.float32)
-    return torch.from_numpy(data)
+    return _zscore_volume_for_model(torch.from_numpy(data)).contiguous()
