@@ -262,7 +262,8 @@ def _resample_to_1mm_same_space(
 def prepare_images_if_needed(
     orig_path: str | Path,
     aparc_path: str | Path,
-    safe: bool = False
+    safe: bool = False,
+    overwrite: bool = False,
 ) -> Tuple[nib.Nifti1Image, nib.Nifti1Image]:
     """
     Return orig and aparc+aseg as Nifti1Image with:
@@ -275,6 +276,9 @@ def prepare_images_if_needed(
     2) Align orig to aparc native grid if needed.
     3) Resample both to 1mm isotropic in that same native space.
     4) Center crop/pad to TARGET_SHAPE for uniform tensor size.
+
+    `overwrite` is accepted for API symmetry with disk-writing callers. This
+    function returns in-memory images and therefore always recomputes them.
     """
     orig_img = _as_ras(load_mgz(orig_path))
     aparc_img = _as_ras(load_mgz(aparc_path))
@@ -373,12 +377,18 @@ def debug_prepare_images_report(
 def prepare_arrays_if_needed(
     orig_path: str | Path,
     aparc_path: str | Path,
+    *,
+    overwrite: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Load both images, co-register to shared native grid, resample to 1mm isotropic,
     then center crop/pad to fixed TARGET_SHAPE and return arrays.
     """
-    orig_out, aparc_out = prepare_images_if_needed(orig_path, aparc_path)
+    orig_out, aparc_out = prepare_images_if_needed(
+        orig_path,
+        aparc_path,
+        overwrite=overwrite,
+    )
     orig = orig_out.get_fdata(dtype=np.float32)
     aparc = np.asarray(aparc_out.dataobj, dtype=np.int32)
     return orig, aparc
@@ -408,11 +418,25 @@ def _pt_exists(path: Path) -> bool:
     return path.exists() and path.stat().st_size > 0
 
 
+def image_is_loadable(path: str | Path) -> bool:
+    """Return True when an image exists, is non-empty, and nibabel can load it."""
+    path = Path(path)
+    if not _pt_exists(path):
+        return False
+    try:
+        img = load_mgz(path)
+        _ = img.shape
+    except (EOFError, ImageFileError, OSError, ValueError):
+        return False
+    return True
+
+
 def _process_one_entry(
     base_path: str,
     paths: dict[str, str],
     out_root: str | Path,
     unsafe_int8: bool = False,
+    overwrite: bool = False,
 ) -> dict[str, Any]:
     """
     Run prepare_arrays_if_needed(orig, aparc+aseg), then save:
@@ -436,7 +460,7 @@ def _process_one_entry(
 
     orig_exists = _pt_exists(orig_out)
     aparc_exists = _pt_exists(aparc_out)
-    if orig_exists and aparc_exists:
+    if not overwrite and orig_exists and aparc_exists:
         return {
             "base_path": base_path,
             "ok": True,
@@ -449,7 +473,11 @@ def _process_one_entry(
     aparc_path = paths["aparc+aseg"]
 
     try:
-        orig_arr, aparc_arr = prepare_arrays_if_needed(orig_path, aparc_path)
+        orig_arr, aparc_arr = prepare_arrays_if_needed(
+            orig_path,
+            aparc_path,
+            overwrite=overwrite,
+        )
     except Exception as e:
         print(f"[convert-error] {orig_path}", flush=True)
         print(f"[convert-error] {aparc_path}", flush=True)
@@ -471,7 +499,7 @@ def _process_one_entry(
 
     save_errors: list[str] = []
 
-    if not orig_exists:
+    if overwrite or not orig_exists:
         try:
             torch.save(orig_tensor, orig_out)
         except Exception as e:
@@ -483,7 +511,7 @@ def _process_one_entry(
                     pass
             save_errors.append(f"{orig_out}: {e}")
 
-    if not aparc_exists:
+    if overwrite or not aparc_exists:
         try:
             torch.save(aparc_tensor, aparc_out)
         except Exception as e:
@@ -518,12 +546,13 @@ def _process_one_entry(
 
 
 def _process_one_entry_star(args):
-    base_path, paths, out_root, unsafe_int8 = args
+    base_path, paths, out_root, unsafe_int8, overwrite = args
     return _process_one_entry(
         base_path=base_path,
         paths=paths,
         out_root=out_root,
         unsafe_int8=unsafe_int8,
+        overwrite=overwrite,
     )
 
 
@@ -532,12 +561,13 @@ def convert_file_map_to_pt(
     out_root: str | Path = "data",
     n_jobs: int = -1,
     unsafe_int8: bool = False,
+    overwrite: bool = False,
 ) -> list[dict[str, Any]]:
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
 
     items = [
-        (base_path, paths, out_root, unsafe_int8)
+        (base_path, paths, out_root, unsafe_int8, overwrite)
         for base_path, paths in file_map.items()
     ]
 
@@ -560,8 +590,16 @@ def mri_convert_available() -> bool:
     return shutil.which("mri_convert") is not None
 
 
+def _image_has_shape(path: str | Path, shape: tuple[int, int, int]) -> bool:
+    try:
+        img = load_mgz(path)
+        return tuple(img.shape[:3]) == tuple(shape)
+    except (EOFError, ImageFileError, OSError, ValueError):
+        return False
+
+
 def _run_mri_convert_binary(img: str | Path, orig: str | Path, extra_args: str = "--conform") -> None:
-    args = ["mri_convert", str(img), str(orig), *shlex.split(extra_args)]
+    args = ["mri_convert", *shlex.split(extra_args), str(img), str(orig)]
     subprocess.run(
         args,
         check=True,
@@ -634,11 +672,17 @@ def run_mri_convert(
     if backend not in {"auto", "freesurfer", "nibabel"}:
         raise ValueError("backend must be 'auto', 'freesurfer', or 'nibabel'")
 
+    requested_backend = backend
     if backend == "auto":
         backend = "freesurfer" if mri_convert_available() else "nibabel"
 
     if backend == "freesurfer":
         _run_mri_convert_binary(img, orig, extra_args=extra_args)
+        if extra_args.strip() in {"--conform", "-c"} and not _image_has_shape(orig, CONFORM_SHAPE):
+            if requested_backend == "freesurfer":
+                raise RuntimeError(f"mri_convert did not create a {CONFORM_SHAPE} conformed image: {orig}")
+            run_nibabel_mri_convert_conform(img, orig)
+            return "nibabel"
         return backend
 
     if extra_args.strip() not in {"--conform", "-c"}:
@@ -652,6 +696,7 @@ def prepare_image(
     out_path: str | Path,
     *,
     conform_backend: str = "auto",
+    overwrite: bool = False,
 ) -> torch.Tensor:
     """
     Return a conformed, z-scored float32 tensor ready for model inference.
@@ -659,7 +704,25 @@ def prepare_image(
     The saved MGZ stays in conformed intensity space; only the returned tensor
     is z-scored to match the training cache.
     """
-    run_mri_convert(img_path, out_path, backend=conform_backend)
-    img = _as_ras(load_mgz(out_path))
+    out_path = Path(out_path)
+    img = None
+    if not overwrite and _pt_exists(out_path):
+        try:
+            img = _as_ras(load_mgz(out_path))
+            if tuple(img.shape[:3]) != tuple(CONFORM_SHAPE):
+                img = None
+        except (EOFError, ImageFileError, OSError, ValueError):
+            img = None
+
+    if img is None:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = out_path.with_name(f".{out_path.name}.tmp.{os.getpid()}.mgz")
+        try:
+            run_mri_convert(img_path, tmp_path, backend=conform_backend)
+            os.replace(tmp_path, out_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        img = _as_ras(load_mgz(out_path))
+
     data = img.get_fdata(dtype=np.float32)
     return _zscore_volume_for_model(torch.from_numpy(data)).contiguous()

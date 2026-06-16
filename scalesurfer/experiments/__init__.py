@@ -11,8 +11,8 @@ import pandas as pd
 import torch
 from tqdm.auto import tqdm
 
-from .api import prepare_data_pipeline
-from .config import (
+from ..api import prepare_data_pipeline
+from ..config import (
     DATA_CFG,
     DEVICE,
     MODEL_CFG,
@@ -21,10 +21,10 @@ from .config import (
     TRAIN_CFG,
     build_runtime_cfgs,
 )
-from .metrics import build_eval_plot_bundle, collect_test_metrics_fast_cached
-from .volume.model import TransUNet3D
-from .train import evaluate_runtime, init_training_runtime, step_scheduler_epoch, train_step_runtime
-from .utils import auto_discover_pairs, gpu_mem_gb
+from ..metrics import build_eval_plot_bundle, collect_test_metrics_fast_cached
+from ..volume.model import TransUNet3D
+from ..train import evaluate_runtime, init_training_runtime, step_scheduler_epoch, train_step_runtime
+from ..utils import auto_discover_pairs, gpu_mem_gb
 
 
 _DS_RE = re.compile(r"(ds\d{6,})", re.IGNORECASE)
@@ -351,7 +351,7 @@ def convert_gcloud_mgz_to_tensors(
 
     Existing outputs are preserved (convert.py skips already-saved pairs).
     """
-    from .convert import convert_file_map_to_pt
+    from ..convert import convert_file_map_to_pt
 
     file_map, missing_raw = discover_gcloud_file_map(gcloud_root)
     if not file_map:

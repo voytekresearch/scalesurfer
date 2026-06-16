@@ -983,6 +983,7 @@ def convert_file_map_to_tensors(
     out_root: str | Path = "tensors",
     n_jobs: int = -1,
     unsafe_int8: bool = False,
+    overwrite: bool = False,
 ):
     from convert import convert_file_map_to_pt
 
@@ -991,6 +992,7 @@ def convert_file_map_to_tensors(
         out_root=out_root,
         n_jobs=n_jobs,
         unsafe_int8=unsafe_int8,
+        overwrite=overwrite,
     )
 
 

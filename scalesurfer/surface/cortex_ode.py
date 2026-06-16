@@ -92,7 +92,7 @@ class PretrainedCortexODEConfig:
     seed_sigma: float = 0.5
     seed_topology_threshold: float = 16.0
     seed_level: float = 0.8
-    seed_step_size: int = 2
+    seed_step_size: int = 1
     seed_smooth_iters: int = 2
     seed_smooth_lambda: float = 1.0
     total_time: float = 1.0

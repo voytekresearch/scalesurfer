@@ -9,6 +9,7 @@ random.seed(SEED)
 torch.manual_seed(SEED)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 if DEVICE == "cuda":
     torch.cuda.manual_seed_all(SEED)
     torch.backends.cudnn.benchmark = True

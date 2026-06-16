@@ -4,6 +4,8 @@ import gzip
 from pathlib import Path
 import numpy as np
 from scipy import ndimage as ndi
+from skimage.filters import gaussian
+from skimage.measure import label as connected_label
 from skimage.measure import marching_cubes
 
 from .CortexODE.util.tca import bit_map, tca_fill, tca_mask_fill
@@ -109,7 +111,7 @@ def extract_topology_corrected_mesh_from_levelset(
     """
     field = np.asarray(levelset, dtype=np.float32)
     if sigma > 0:
-        field = ndi.gaussian_filter(field, sigma=float(sigma)).astype(np.float32)
+        field = gaussian(field, sigma=float(sigma)).astype(np.float32)
     corrected = topology_correct_levelset(field, threshold=float(topology_threshold), corrector=corrector)
     verts, faces = extract_mesh_from_levelset(corrected, level=float(level), step_size=int(step_size))
     if verts.shape[0] > 0 and faces.shape[0] > 0 and n_smooth > 0:
@@ -129,7 +131,7 @@ def signed_distance_from_mask(mask: np.ndarray, *, sigma: float = 0.5) -> np.nda
     sdf = -ndi.distance_transform_cdt(mask) + ndi.distance_transform_cdt(~mask)
     sdf = np.asarray(sdf, dtype=np.float32)
     if sigma > 0:
-        sdf = ndi.gaussian_filter(sdf, sigma=float(sigma))
+        sdf = gaussian(sdf, sigma=float(sigma))
     return sdf.astype(np.float32)
 
 
@@ -153,16 +155,31 @@ def extract_mesh_from_levelset(
     if vol.min() >= level or vol.max() <= level:
         return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.int32)
 
+    # Match the released CortexODE extraction path:
+    # marching_cubes(-sdf_topo, level=-level, method="lorensen").
+    #
+    # The Lorensen implementation is important here. With the corrected SDFs
+    # produced by the Bazin-style topology pass, skimage's default Lewiner
+    # variant can still emit high-genus meshes at the CortexODE extraction
+    # level, while Lorensen preserves the expected spherical topology.
+    mc_vol = -vol
+    mc_level = -float(level)
+    outside = min(float(mc_vol.min()), mc_level - 1.0)
+    mc_vol = np.pad(mc_vol, 1, mode="constant", constant_values=outside)
+
     try:
         verts, faces, _, _ = marching_cubes(
-            vol,
-            level=float(level),
+            mc_vol,
+            level=mc_level,
             step_size=max(1, int(step_size)),
-            allow_degenerate=False,
+            allow_degenerate=True,
+            method="lorensen",
         )
     except RuntimeError:
         return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.int32)
-    return np.asarray(verts, dtype=np.float32), np.asarray(faces, dtype=np.int32)
+    verts = np.asarray(verts, dtype=np.float32) - 1.0
+    faces = np.asarray(faces, dtype=np.int32)
+    return _largest_mesh_component(verts, faces)
 
 
 def laplacian_smooth_mesh(
@@ -250,11 +267,35 @@ def _default_topology_lut_path() -> Path:
     )
 
 
+def _largest_mesh_component(
+    verts: np.ndarray, faces: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Keep only the largest connected component of a triangle mesh."""
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    n = len(verts)
+    if n == 0 or len(faces) == 0:
+        return verts, faces
+    rows = np.concatenate([faces[:, 0], faces[:, 1], faces[:, 2]])
+    cols = np.concatenate([faces[:, 1], faces[:, 2], faces[:, 0]])
+    adj = csr_matrix((np.ones(len(rows), dtype=np.float32), (rows, cols)), shape=(n, n))
+    n_comps, labels = connected_components(adj, directed=False)
+    if n_comps <= 1:
+        return verts, faces
+    main = int(np.bincount(labels).argmax())
+    keep = labels == main
+    new_idx = np.full(n, -1, dtype=np.int64)
+    new_idx[keep] = np.arange(keep.sum(), dtype=np.int64)
+    good = np.all(keep[faces], axis=1)
+    return verts[keep], new_idx[faces[good]].astype(np.int32)
+
+
 def _largest_component(mask: np.ndarray) -> np.ndarray:
     mask = np.asarray(mask, dtype=bool)
     if not mask.any():
         return mask
-    labels, n_labels = ndi.label(mask)
+    labels, n_labels = connected_label(mask, connectivity=2, return_num=True)
     if n_labels <= 1:
         return mask
     counts = np.bincount(labels.ravel())
