@@ -276,7 +276,7 @@ class TransUNet3D(nn.Module):
         # Stable channel-wise LayerNorm for [B, C, N] classifier chunks.
         # This mirrors token_norm without forcing the whole dense feature map
         # into fp32 at once.
-        work = feat.float() if feat.dtype in {torch.float16, torch.bfloat16} else feat
+        work = feat.float() if feat.dtype == torch.float16 else feat
         mean = work.mean(dim=1, keepdim=True)
         var = work.var(dim=1, keepdim=True, unbiased=False)
         work = (work - mean) * torch.rsqrt(var + self.token_norm.eps)
@@ -285,6 +285,15 @@ class TransUNet3D(nn.Module):
             bias = self.token_norm.bias.view(1, -1, 1).to(device=work.device, dtype=work.dtype)
             work = work * weight + bias
         return work.to(dtype=feat.dtype)
+
+    def _classification_prediction_dtype(self):
+        if self.n_classes <= 256:
+            return torch.uint8
+        if self.n_classes <= torch.iinfo(torch.int16).max + 1:
+            return torch.int16
+        if self.n_classes <= torch.iinfo(torch.int32).max + 1:
+            return torch.int32
+        return torch.int64
 
     def _classifier_chunk_voxels(self, n_voxels: int, patch_chunk_size) -> int:
         if patch_chunk_size is None:
@@ -330,7 +339,7 @@ class TransUNet3D(nn.Module):
         logits = F.conv3d(feat, weight, self.classifier.bias)
 
         if self.task_type == "classification":
-            return logits.argmax(dim=1)
+            return logits.argmax(dim=1).to(dtype=self._classification_prediction_dtype())
 
         return logits.squeeze(1)
 
@@ -339,7 +348,7 @@ class TransUNet3D(nn.Module):
         n_voxels = d * h * w
         chunk_voxels = self._classifier_chunk_voxels(n_voxels, patch_chunk_size)
         feat_flat = feat.flatten(2)
-        pred_dtype = torch.int64 if self.task_type == "classification" else feat.dtype
+        pred_dtype = self._classification_prediction_dtype() if self.task_type == "classification" else feat.dtype
         pred_flat = torch.empty((b, n_voxels), device=feat.device, dtype=pred_dtype)
         weight = self.classifier.weight[:, :, None]
         for s in range(0, n_voxels, chunk_voxels):

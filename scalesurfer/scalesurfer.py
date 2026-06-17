@@ -1,4 +1,5 @@
 """High-level API for interacting with models."""
+from concurrent.futures import ALL_COMPLETED, FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
 import json
 import os
 import zipfile
@@ -9,6 +10,7 @@ from joblib import Parallel, delayed
 from math import ceil
 import numpy as np
 import torch
+from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
 from scalesurfer.config import DEVICE
@@ -74,6 +76,24 @@ _VOLUME_MODEL_SPECS = {
 }
 _VOLUME_PROVENANCE_FILENAME = "scalesurfer_aparc_aseg.json"
 _VOLUME_LOG_FILENAME = "scalesurfer_aparc_aseg.log"
+
+
+def _normalize_writer_backend(value: str) -> str:
+    backend = str(value).strip().lower()
+    if backend not in {"thread", "process"}:
+        raise ValueError("writer_backend must be 'thread' or 'process'")
+    return backend
+
+
+def _default_inference_num_workers(n_jobs_cpu) -> int:
+    if n_jobs_cpu is None:
+        return 0
+    n_jobs = int(n_jobs_cpu)
+    if n_jobs == 0:
+        return 0
+    if n_jobs < 0:
+        return min(4, max(1, os.cpu_count() or 1))
+    return max(0, n_jobs)
 
 
 def _normalize_fs_version(fs_version) -> int:
@@ -303,6 +323,148 @@ def _prepared_orig_mgz_is_valid(path: str | Path) -> bool:
         return False
 
 
+def _volume_provenance_payload(
+    *,
+    subject: str,
+    fs_version: int,
+    checkpoint_path: str | Path,
+) -> dict:
+    return {
+        "kind": "aparc+aseg",
+        "generator": "ScaleSurfer.predict_volumes",
+        "created_at": _utc_now_iso(),
+        "subject": str(subject),
+        "fs_version": int(fs_version),
+        "checkpoint_path": str(checkpoint_path),
+        "outputs": ["mri/aparc+aseg.pt"],
+    }
+
+
+def _write_volume_provenance_files(
+    *,
+    subject_dir: str | Path,
+    subject: str,
+    fs_version: int,
+    checkpoint_path: str | Path,
+) -> None:
+    subject_dir = Path(subject_dir) / str(subject)
+    scripts_dir = subject_dir / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    payload = _volume_provenance_payload(
+        subject=str(subject),
+        fs_version=int(fs_version),
+        checkpoint_path=checkpoint_path,
+    )
+    (scripts_dir / _VOLUME_PROVENANCE_FILENAME).write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (scripts_dir / _VOLUME_LOG_FILENAME).write_text(
+        "\n".join(
+            [
+                "ScaleSurfer predicted aparc+aseg",
+                f"created_at={payload['created_at']}",
+                f"subject={payload['subject']}",
+                f"fs_version={payload['fs_version']}",
+                f"checkpoint_path={payload['checkpoint_path']}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_volume_prediction_job(
+    dense_label: torch.Tensor,
+    out_path: str | Path,
+    subject_dir: str | Path,
+    subject: str,
+    fs_version: int,
+    checkpoint_path: str | Path,
+    save_dtype: torch.dtype | None = None,
+) -> str:
+    if dense_label.device.type != "cpu" or (save_dtype is not None and dense_label.dtype != save_dtype):
+        dense_label = dense_label.detach().to(device="cpu", dtype=save_dtype or dense_label.dtype)
+    dense_label = dense_label.contiguous().clone()
+    _save_torch_zip_deflated(dense_label, out_path)
+    _write_volume_provenance_files(
+        subject_dir=subject_dir,
+        subject=subject,
+        fs_version=fs_version,
+        checkpoint_path=checkpoint_path,
+    )
+    return str(out_path)
+
+
+def _write_stats_prediction_job(
+    subject_frame: pd.DataFrame,
+    subjects_dir: str | Path,
+    fs_version: int | str,
+    checkpoint_path: str | Path | None,
+) -> list[str]:
+    written = write_stats_outputs(
+        subject_frame,
+        subjects_dir,
+        fs_version=fs_version,
+        checkpoint_path=checkpoint_path,
+        overwrite=True,
+        progress=False,
+    )
+    return [str(path) for path in written]
+
+
+class _VolumeOrigDataset(Dataset):
+    def __init__(self, subject_dir: str | Path, subjects: list[str], indices: list[int]):
+        self.subject_dir = Path(subject_dir)
+        self.subjects = [str(subject) for subject in subjects]
+        self.indices = [int(idx) for idx in indices]
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __getitem__(self, item: int) -> dict[str, object]:
+        isub = self.indices[int(item)]
+        subject = self.subjects[isub]
+        orig_path = self.subject_dir / subject / "mri" / "orig.pt"
+        orig = _torch_load_weights(orig_path, mmap=True)
+        if not isinstance(orig, torch.Tensor) or tuple(orig.shape) != tuple(CONFORM_SHAPE):
+            shape = tuple(orig.shape) if isinstance(orig, torch.Tensor) else type(orig).__name__
+            raise RuntimeError(
+                f"{orig_path} has shape {shape}, expected {CONFORM_SHAPE}. "
+                "Run surfer.prepare_images(overwrite=True) or delete this stale prepared tensor."
+            )
+        return {
+            "isub": isub,
+            "subject": subject,
+            "orig": torch.as_tensor(orig).squeeze().contiguous(),
+        }
+
+
+class _StatsTensorDataset(Dataset):
+    def __init__(self, subject_dir: str | Path, subjects: list[str]):
+        self.subject_dir = Path(subject_dir)
+        self.subjects = [str(subject) for subject in subjects]
+
+    def __len__(self) -> int:
+        return len(self.subjects)
+
+    def __getitem__(self, item: int) -> dict[str, object]:
+        subject = self.subjects[int(item)]
+        mri_dir = self.subject_dir / subject / "mri"
+        t1_path = mri_dir / "orig.pt"
+        seg_path = mri_dir / "aparc+aseg.pt"
+        if not t1_path.exists() or not seg_path.exists():
+            missing = [str(path) for path in (t1_path, seg_path) if not path.exists()]
+            raise FileNotFoundError("Missing required ScaleSurfer tensor(s): " + ", ".join(missing))
+        t1 = _torch_load_weights(t1_path, mmap=True)
+        seg = _torch_load_weights(seg_path, mmap=True)
+        return {
+            "subject": subject,
+            "t1": torch.as_tensor(t1).squeeze().contiguous(),
+            "seg": torch.as_tensor(seg).squeeze().contiguous(),
+        }
+
+
 class ScaleSurfer:
 
     def __init__(
@@ -320,6 +482,14 @@ class ScaleSurfer:
         pretrained_data_name="adni",
         conform_backend="auto",
         compress_orig=False,
+        async_writes=False,
+        writer_backend="thread",
+        writer_workers=1,
+        writer_queue_size=2,
+        inference_num_workers=None,
+        prefetch_factor=2,
+        pin_memory=True,
+        persistent_workers=True,
         overwrite=False,
         verbose=True,
     ):
@@ -333,6 +503,28 @@ class ScaleSurfer:
         compress_orig : bool, default=False
             If True, write mri/orig.pt as a deflated torch zip archive.
             This saves disk space but makes prepare_images CPU-bound.
+        async_writes : bool, default=False
+            If True, write predicted volume/stat outputs and provenance in a
+            bounded background executor while later GPU batches run.
+        writer_backend : {"thread", "process"}, default="thread"
+            Background executor type used when async_writes=True.
+            Threads avoid serializing large tensors between processes and are
+            usually the right first choice for disk writes.
+        writer_workers : int, default=1
+            Number of background writer workers.
+        writer_queue_size : int, default=2
+            Maximum number of pending background write jobs before prediction
+            waits for at least one write to complete.
+        inference_num_workers : int, optional
+            Number of PyTorch DataLoader workers for inference input loading.
+            Defaults to a conservative value derived from n_jobs_cpu.
+        prefetch_factor : int or None, default=2
+            Number of batches prefetched per DataLoader worker when
+            inference_num_workers > 0.
+        pin_memory : bool, default=True
+            Pin CPU input batches before CUDA transfer when running on CUDA.
+        persistent_workers : bool, default=True
+            Keep DataLoader workers alive for the duration of an inference call.
         """
 
         self.anat_files = anat_files
@@ -344,6 +536,18 @@ class ScaleSurfer:
         self.pretrained_data_name = pretrained_data_name
         self.conform_backend = conform_backend
         self.compress_orig = bool(compress_orig)
+        self.async_writes = bool(async_writes)
+        self.writer_backend = _normalize_writer_backend(writer_backend)
+        self.writer_workers = max(1, int(writer_workers))
+        self.writer_queue_size = max(1, int(writer_queue_size))
+        self.inference_num_workers = (
+            _default_inference_num_workers(self.n_jobs)
+            if inference_num_workers is None
+            else max(0, int(inference_num_workers))
+        )
+        self.prefetch_factor = None if prefetch_factor is None else max(1, int(prefetch_factor))
+        self.pin_memory = bool(pin_memory)
+        self.persistent_workers = bool(persistent_workers)
         self.overwrite = overwrite
         self.verbose = verbose
         self.volume_dtype = _normalize_volume_dtype(volume_dtype)
@@ -398,6 +602,21 @@ class ScaleSurfer:
     def _profile_enabled(self) -> bool:
         value = os.environ.get("SCALESURFER_PROFILE", "")
         return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+    def _make_inference_loader(self, dataset: Dataset, *, batch_size: int) -> DataLoader:
+        num_workers = max(0, int(self.inference_num_workers))
+        kwargs = {
+            "dataset": dataset,
+            "batch_size": max(1, int(batch_size)),
+            "shuffle": False,
+            "num_workers": num_workers,
+            "pin_memory": bool(self.pin_memory and str(self.device).startswith("cuda")),
+        }
+        if num_workers > 0:
+            kwargs["persistent_workers"] = bool(self.persistent_workers)
+            if self.prefetch_factor is not None:
+                kwargs["prefetch_factor"] = int(self.prefetch_factor)
+        return DataLoader(**kwargs)
 
     # Model loaders
     @property
@@ -508,34 +727,11 @@ class ScaleSurfer:
         return True
 
     def _write_volume_provenance(self, subject: str) -> None:
-        subject_dir = self.subject_dir / str(subject)
-        scripts_dir = subject_dir / "scripts"
-        scripts_dir.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "kind": "aparc+aseg",
-            "generator": "ScaleSurfer.predict_volumes",
-            "created_at": _utc_now_iso(),
-            "subject": str(subject),
-            "fs_version": int(self.fs_version),
-            "checkpoint_path": str(self.chkpt_path_volume),
-            "outputs": ["mri/aparc+aseg.pt"],
-        }
-        (scripts_dir / _VOLUME_PROVENANCE_FILENAME).write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        (scripts_dir / _VOLUME_LOG_FILENAME).write_text(
-            "\n".join(
-                [
-                    "ScaleSurfer predicted aparc+aseg",
-                    f"created_at={payload['created_at']}",
-                    f"subject={payload['subject']}",
-                    f"fs_version={payload['fs_version']}",
-                    f"checkpoint_path={payload['checkpoint_path']}",
-                ]
-            )
-            + "\n",
-            encoding="utf-8",
+        _write_volume_provenance_files(
+            subject_dir=self.subject_dir,
+            subject=str(subject),
+            fs_version=int(self.fs_version),
+            checkpoint_path=self.chkpt_path_volume,
         )
 
 
@@ -709,75 +905,130 @@ class ScaleSurfer:
         t0 = time()
         bs = batch_size if batch_size is not None else self.batch_size
         profile = self._profile_enabled()
-
-        for idx in self._tqdm(
-            range(0, len(predict_indices), bs),
-            total=ceil(len(predict_indices) / bs),
-            desc="Predicting volumes"
-        ):
-            if profile:
-                self._sync_device()
-                batch_t0 = perf_counter()
-
-            # Construct orig tensor
-            batch_indices = predict_indices[idx : idx + bs]
-            n_subjects = len(batch_indices)
-            X = torch.empty((n_subjects, 256, 256, 256), dtype=volume_dtype, device=self.device)
-            if profile:
-                self._sync_device()
-                alloc_sec = perf_counter() - batch_t0
-                load_t0 = perf_counter()
-            for i, isub in enumerate(batch_indices):
-                subject = str(self.subjects[isub])
-                orig_path = self.subject_dir / subject / "mri" / "orig.pt"
-                orig = _torch_load_weights(orig_path, mmap=True)
-                if not isinstance(orig, torch.Tensor) or tuple(orig.shape) != tuple(CONFORM_SHAPE):
-                    shape = tuple(orig.shape) if isinstance(orig, torch.Tensor) else type(orig).__name__
-                    raise RuntimeError(
-                        f"{orig_path} has shape {shape}, expected {CONFORM_SHAPE}. "
-                        "Run surfer.prepare_images(overwrite=True) or delete this stale prepared tensor."
-                    )
-                X[i].copy_(orig)
-            if profile:
-                self._sync_device()
-                load_sec = perf_counter() - load_t0
-
-            # Predict
-            if profile:
-                predict_t0 = perf_counter()
-            aparc_aseg_pred = self._predict_volume(
-                X,
-                patch_chunk_size=patch_chunk_size,
-                volume_dtype=volume_dtype,
-            )
-            if profile:
-                self._sync_device()
-                predict_sec = perf_counter() - predict_t0
-                store_t0 = perf_counter()
-            if write:
-                aparc_aseg_cpu = aparc_aseg_pred.detach().to(device="cpu", dtype=pred_save_dtype)
-                for i, isub in enumerate(batch_indices):
-                    subject = str(self.subjects[isub])
-                    out_path = self.subject_dir / subject / "mri" / "aparc+aseg.pt"
-                    # Clone the slice so torch.save does not serialize the whole
-                    # batch storage for every subject.
-                    dense_label = aparc_aseg_cpu[i].contiguous().clone()
-                    _save_torch_zip_deflated(dense_label, out_path)
-                    self._write_volume_provenance(subject)
-            else:
-                self.predicted_volumes[idx:idx + n_subjects] = aparc_aseg_pred.to(dtype=pred_save_dtype)
-            if profile:
-                self._sync_device()
-                store_sec = perf_counter() - store_t0
-                total_sec = perf_counter() - batch_t0
+        executor = None
+        pending_writes = []
+        writer_max_pending = max(1, int(self.writer_queue_size))
+        if write and self.async_writes:
+            executor_cls = ThreadPoolExecutor if self.writer_backend == "thread" else ProcessPoolExecutor
+            executor = executor_cls(max_workers=self.writer_workers)
+            if self.verbose:
                 print(
-                    "[scalesurfer] batch "
-                    f"{idx // bs}: alloc={alloc_sec:.3f}s "
-                    f"load_copy={load_sec:.3f}s "
-                    f"predict={predict_sec:.3f}s "
-                    f"store={store_sec:.3f}s "
-                    f"total={total_sec:.3f}s"
+                    "[scalesurfer] predict_volumes: async volume writes enabled "
+                    f"backend={self.writer_backend} "
+                    f"workers={self.writer_workers} "
+                    f"queue_size={writer_max_pending}"
                 )
+
+        def drain_pending_writes(*, block: bool = False) -> None:
+            nonlocal pending_writes
+            if not pending_writes:
+                return
+            done, not_done = wait(
+                pending_writes,
+                return_when=ALL_COMPLETED if block else FIRST_COMPLETED,
+            )
+            for future in done:
+                future.result()
+            pending_writes = list(not_done)
+
+        def submit_volume_write(
+            dense_label: torch.Tensor,
+            out_path: Path,
+            subject: str,
+            save_dtype: torch.dtype | None = None,
+        ) -> None:
+            if executor is None:
+                _write_volume_prediction_job(
+                    dense_label,
+                    out_path,
+                    self.subject_dir,
+                    subject,
+                    int(self.fs_version),
+                    self.chkpt_path_volume,
+                    save_dtype,
+                )
+                return
+            pending_writes.append(
+                executor.submit(
+                    _write_volume_prediction_job,
+                    dense_label,
+                    out_path,
+                    self.subject_dir,
+                    subject,
+                    int(self.fs_version),
+                    self.chkpt_path_volume,
+                    save_dtype,
+                )
+            )
+            if len(pending_writes) >= writer_max_pending:
+                drain_pending_writes(block=False)
+
+        volume_dataset = _VolumeOrigDataset(self.subject_dir, [str(s) for s in self.subjects], predict_indices)
+        volume_loader = self._make_inference_loader(volume_dataset, batch_size=bs)
+        non_blocking_h2d = bool(self.pin_memory and str(self.device).startswith("cuda"))
+        out_offset = 0
+        try:
+            for batch_no, batch in enumerate(
+                self._tqdm(
+                    volume_loader,
+                    total=len(volume_loader),
+                    desc="Predicting volumes"
+                )
+            ):
+                if profile:
+                    self._sync_device()
+                    batch_t0 = perf_counter()
+
+                batch_subjects = [str(subject) for subject in batch["subject"]]
+                n_subjects = len(batch_subjects)
+                if profile:
+                    load_t0 = perf_counter()
+                X = batch["orig"].to(
+                    device=self.device,
+                    dtype=volume_dtype,
+                    non_blocking=non_blocking_h2d,
+                )
+                if profile:
+                    self._sync_device()
+                    alloc_sec = 0.0
+                    load_sec = perf_counter() - load_t0
+
+                # Predict
+                if profile:
+                    predict_t0 = perf_counter()
+                aparc_aseg_pred = self._predict_volume(
+                    X,
+                    patch_chunk_size=patch_chunk_size,
+                    volume_dtype=volume_dtype,
+                )
+                if profile:
+                    self._sync_device()
+                    predict_sec = perf_counter() - predict_t0
+                    store_t0 = perf_counter()
+                if write:
+                    aparc_aseg_cpu = aparc_aseg_pred.detach().to(device="cpu", dtype=pred_save_dtype)
+                    for i, subject in enumerate(batch_subjects):
+                        out_path = self.subject_dir / subject / "mri" / "aparc+aseg.pt"
+                        submit_volume_write(aparc_aseg_cpu[i], out_path, subject)
+                else:
+                    self.predicted_volumes[out_offset:out_offset + n_subjects] = aparc_aseg_pred.to(dtype=pred_save_dtype)
+                    out_offset += n_subjects
+                if profile:
+                    self._sync_device()
+                    store_sec = perf_counter() - store_t0
+                    total_sec = perf_counter() - batch_t0
+                    print(
+                        "[scalesurfer] batch "
+                        f"{batch_no}: alloc={alloc_sec:.3f}s "
+                        f"load_copy={load_sec:.3f}s "
+                        f"predict={predict_sec:.3f}s "
+                        f"store={store_sec:.3f}s "
+                        f"total={total_sec:.3f}s"
+                    )
+            drain_pending_writes(block=True)
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True)
 
         self._sync_device()
         if self.verbose:
@@ -874,26 +1125,81 @@ class ScaleSurfer:
                 checkpoint_path=checkpoint_path,
                 local_files_only=local_files_only,
             )
-            new_long = predictor.predict_subjects(
-                self.subject_dir,
-                predict_subjects,
-                batch_size=batch_size if batch_size is not None else self.batch_size,
-                seg_is_dense=seg_is_dense,
-                return_format="long",
-                progress=self.progress,
-                desc="Predicting stats",
-            )
-            if write:
-                write_stats_outputs(
-                    new_long,
-                    self.subject_dir,
-                    fs_version=stats_fs_version,
-                    checkpoint_path=predictor.checkpoint_path,
-                    overwrite=True,
-                    progress=self.progress,
-                    desc="Writing stats",
+            bs = batch_size if batch_size is not None else self.batch_size
+            stats_dataset = _StatsTensorDataset(self.subject_dir, predict_subjects)
+            stats_loader = self._make_inference_loader(stats_dataset, batch_size=bs)
+            iterator = self._tqdm(stats_loader, total=len(stats_loader), desc="Predicting stats")
+
+            executor = None
+            pending_writes = []
+            writer_max_pending = max(1, int(self.writer_queue_size))
+            if write and self.async_writes:
+                executor_cls = ThreadPoolExecutor if self.writer_backend == "thread" else ProcessPoolExecutor
+                executor = executor_cls(max_workers=self.writer_workers)
+                if self.verbose:
+                    print(
+                        "[scalesurfer] predict_stats: async stats writes enabled "
+                        f"backend={self.writer_backend} "
+                        f"workers={self.writer_workers} "
+                        f"queue_size={writer_max_pending}"
+                    )
+
+            def drain_pending_stats_writes(*, block: bool = False) -> None:
+                nonlocal pending_writes
+                if not pending_writes:
+                    return
+                done, not_done = wait(
+                    pending_writes,
+                    return_when=ALL_COMPLETED if block else FIRST_COMPLETED,
                 )
-            frames.append(new_long)
+                for future in done:
+                    future.result()
+                pending_writes = list(not_done)
+
+            def submit_stats_write(subject_frame: pd.DataFrame) -> None:
+                subject_frame = subject_frame.copy()
+                if executor is None:
+                    _write_stats_prediction_job(
+                        subject_frame,
+                        self.subject_dir,
+                        stats_fs_version,
+                        predictor.checkpoint_path,
+                    )
+                    return
+                pending_writes.append(
+                    executor.submit(
+                        _write_stats_prediction_job,
+                        subject_frame,
+                        self.subject_dir,
+                        stats_fs_version,
+                        predictor.checkpoint_path,
+                    )
+                )
+                if len(pending_writes) >= writer_max_pending:
+                    drain_pending_stats_writes(block=False)
+
+            new_frames = []
+            try:
+                for batch in iterator:
+                    batch_subjects = [str(subject) for subject in batch["subject"]]
+                    batch_long = predictor.predict_tensors(
+                        batch["t1"],
+                        batch["seg"],
+                        subjects=batch_subjects,
+                        seg_is_dense=seg_is_dense,
+                        return_format="long",
+                    )
+                    new_frames.append(batch_long)
+                    if write:
+                        for _, subject_frame in batch_long.groupby("subject", sort=False):
+                            submit_stats_write(subject_frame)
+                drain_pending_stats_writes(block=True)
+            finally:
+                if executor is not None:
+                    executor.shutdown(wait=True)
+
+            if new_frames:
+                frames.append(pd.concat(new_frames, ignore_index=True))
 
         long_df = pd.concat(frames, ignore_index=True) if frames else load_stats_features(
             self.subject_dir,
