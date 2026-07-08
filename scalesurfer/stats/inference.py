@@ -15,7 +15,6 @@ from ..data import build_label_lut, default_aparc_aseg_label_values
 from ..metrics import dense_labels_to_fs_ids
 from ..volume.model import TransUNet3D
 from .models import StatsPredictionModel, TransUNetEncoderAdapter
-from .train import load_stats_checkpoint
 from .utils import (
     APARC_STATS_NAMES,
     APARC_TABLE_COLUMNS,
@@ -23,11 +22,12 @@ from .utils import (
     VOLUME_TABLE_COLUMNS,
     flatten_stats_file,
     safe_name,
+    strip_compile_prefix,
     target_parts,
 )
 
 
-STATS_MODEL_FILENAME = "stats_model.pt"
+STATS_MODEL_FILENAME = "stats_model.safetensors"
 STATS_CONFIG_FILENAME = "config.json"
 STATS_METADATA_FILENAME = "metadata.json"
 DEFAULT_STATS_HF_NAMESPACE = "rphammonds"
@@ -83,14 +83,19 @@ def _download_stats_file(repo_name: str, filename: str, *, local_files_only: boo
             "or set SCALESURFER_STATS_MODEL_DIR to a local model directory."
         ) from exc
 
-    return Path(
-        hf_hub_download(
-            repo_id=_stats_hf_repo_id(repo_name),
-            filename=filename,
-            repo_type="model",
-            local_files_only=local_files_only,
+    try:
+        return Path(
+            hf_hub_download(
+                repo_id=_stats_hf_repo_id(repo_name),
+                filename=filename,
+                repo_type="model",
+                local_files_only=local_files_only,
+            )
         )
-    )
+    except Exception as exc:
+        if isinstance(exc, FileNotFoundError) or "EntryNotFound" in type(exc).__name__:
+            raise FileNotFoundError(f"{repo_name}/{filename}") from exc
+        raise
 
 
 def resolve_stats_checkpoint_path(
@@ -99,13 +104,13 @@ def resolve_stats_checkpoint_path(
     checkpoint_path: str | Path | None = None,
     local_files_only: bool = False,
 ) -> Path:
+    repo_name = stats_repo_name(fs_version)
     if checkpoint_path is not None:
         path = Path(checkpoint_path).expanduser()
-        if not path.exists():
-            raise FileNotFoundError(path)
-        return path
+        if path.suffix == ".safetensors" and path.exists():
+            return path
+        return _download_stats_file(repo_name, STATS_MODEL_FILENAME, local_files_only=local_files_only)
 
-    repo_name = stats_repo_name(fs_version)
     for repo_dir in _candidate_stats_repo_dirs(repo_name):
         path = repo_dir / STATS_MODEL_FILENAME
         if path.exists():
@@ -114,7 +119,9 @@ def resolve_stats_checkpoint_path(
     try:
         return _download_stats_file(repo_name, STATS_MODEL_FILENAME, local_files_only=local_files_only)
     except FileNotFoundError as exc:
-        searched = ", ".join(str(path / STATS_MODEL_FILENAME) for path in _candidate_stats_repo_dirs(repo_name))
+        searched = ", ".join(
+            str(path / STATS_MODEL_FILENAME) for path in _candidate_stats_repo_dirs(repo_name)
+        )
         suffix = f" Searched override dirs: {searched}." if searched else ""
         raise FileNotFoundError(
             f"Could not find stats model for {fs_version!r} in the Hugging Face cache."
@@ -189,10 +196,22 @@ def _encoder_config_from_stats_config(config: dict[str, object]) -> dict[str, ob
     }
 
 
-def _load_torch_checkpoint(path: Path) -> dict[str, object]:
-    checkpoint = torch.load(path, map_location="cpu")
+def _load_stats_safetensors(path: Path) -> dict[str, object]:
+    try:
+        from safetensors import safe_open
+    except ImportError as exc:
+        raise ImportError("Install safetensors to load ScaleSurfer stats checkpoints.") from exc
+
+    with safe_open(str(path), framework="pt", device="cpu") as f:
+        metadata = f.metadata() or {}
+        model_state = {name: f.get_tensor(name) for name in f.keys()}
+    serialized = metadata.get("checkpoint_metadata")
+    if serialized is None:
+        raise ValueError(f"Safetensors stats checkpoint is missing checkpoint_metadata: {path}")
+    checkpoint = json.loads(serialized)
     if not isinstance(checkpoint, dict):
-        raise ValueError(f"Expected stats checkpoint dict: {path}")
+        raise ValueError(f"Expected checkpoint_metadata object: {path}")
+    checkpoint["model_state"] = model_state
     return checkpoint
 
 
@@ -600,7 +619,7 @@ class ScaleSurferStatsPredictor:
             checkpoint_path=checkpoint_path,
             local_files_only=local_files_only,
         )
-        checkpoint = _load_torch_checkpoint(resolved)
+        checkpoint = _load_stats_safetensors(resolved)
         bundle_config = _load_stats_bundle_config(resolved)
         if not bundle_config and checkpoint_path is None:
             resolved_config = resolve_stats_config_path(fs_version, local_files_only=local_files_only)
@@ -626,7 +645,12 @@ class ScaleSurferStatsPredictor:
             dropout=float(config.get("dropout", 0.1)),
             device="cpu",
         )
-        load_stats_checkpoint(model, resolved, device="cpu", load_encoder=True)
+        state = strip_compile_prefix(checkpoint["model_state"])
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        if missing:
+            print(f"[ScaleSurferStatsPredictor] missing keys: {len(missing)}")
+        if unexpected:
+            print(f"[ScaleSurferStatsPredictor] unexpected keys: {len(unexpected)}")
         model.freeze_encoder(True)
         model.to(device=device)
         model.eval()

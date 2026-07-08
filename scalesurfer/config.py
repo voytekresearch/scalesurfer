@@ -12,7 +12,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 if DEVICE == "cuda":
     torch.cuda.manual_seed_all(SEED)
-    torch.backends.cudnn.benchmark = True
+    #torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 

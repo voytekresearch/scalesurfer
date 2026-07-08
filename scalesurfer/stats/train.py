@@ -270,22 +270,25 @@ def checkpoint_payload(
     }
 
 
-def load_stats_checkpoint(
+def _load_stats_training_checkpoint(
     model: StatsPredictionModel,
     checkpoint_path: str | Path,
     *,
     device: str | torch.device,
     load_encoder: bool = True,
+    checkpoint: dict | None = None,
 ) -> dict:
-    ckpt = torch.load(Path(checkpoint_path), map_location=device)
+    ckpt = checkpoint if checkpoint is not None else torch.load(Path(checkpoint_path), map_location=device)
+    if not isinstance(ckpt, dict):
+        raise ValueError(f"Expected stats training checkpoint dict: {checkpoint_path}")
     state = strip_compile_prefix(ckpt["model_state"])
     if not bool(load_encoder):
         state = {k: v for k, v in state.items() if not k.startswith("encoder.")}
     missing, unexpected = model.load_state_dict(state, strict=False)
     if missing:
-        print(f"[load_stats_checkpoint] missing keys: {len(missing)}")
+        print(f"[load_stats_training_checkpoint] missing keys: {len(missing)}")
     if unexpected:
-        print(f"[load_stats_checkpoint] unexpected keys: {len(unexpected)}")
+        print(f"[load_stats_training_checkpoint] unexpected keys: {len(unexpected)}")
     return ckpt
 
 
@@ -343,7 +346,7 @@ def train_stats_stage(
         device=device,
     )
     if init_stats_checkpoint is not None:
-        load_stats_checkpoint(model, init_stats_checkpoint, device=device, load_encoder=bool(load_init_encoder))
+        _load_stats_training_checkpoint(model, init_stats_checkpoint, device=device, load_encoder=bool(load_init_encoder))
     model.freeze_encoder(bool(freeze_encoder))
 
     feature_cache_path = None
@@ -537,7 +540,7 @@ def train_stats_stage(
             print(f"[{stage}] saved best checkpoint -> {checkpoint_path}")
 
     if checkpoint_path.exists():
-        load_stats_checkpoint(model, checkpoint_path, device=device, load_encoder=True)
+        _load_stats_training_checkpoint(model, checkpoint_path, device=device, load_encoder=True)
 
     history_df = pd.DataFrame(history)
     history_df.to_csv(run_dir / "history.csv", index=False)

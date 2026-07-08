@@ -475,7 +475,7 @@ class ScaleSurfer:
         *,
         batch_size=1,
         n_jobs_cpu=1,
-        fs_version=8,
+        fs_version=7,
         device=None,
         volume_dtype="float32",
         progress=True,
@@ -760,7 +760,7 @@ class ScaleSurfer:
             out_mgz,
             conform_backend=self.conform_backend,
             overwrite=overwrite,
-        ).to(dtype=torch.float32).contiguous()
+        ).to(dtype=self.volume_dtype).contiguous()
         if img_tensor.device.type != "cpu":
             img_tensor = img_tensor.cpu()
         if compress_orig:
@@ -1251,7 +1251,7 @@ class ScaleSurfer:
             raise FileNotFoundError("Missing required volume file(s): " + ", ".join(missing))
 
         orig_img = nib.as_closest_canonical(nib.load(str(orig_path)))
-        x = torch.load(x_path, map_location="cpu")
+        x = torch.load(x_path, map_location="cpu").to(torch.float32)
         y = torch.load(y_path, map_location="cpu")
         if torch.is_tensor(x):
             x = x.detach().cpu().numpy()
