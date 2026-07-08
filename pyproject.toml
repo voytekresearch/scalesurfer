@@ -3,7 +3,7 @@ name = "scalesurfer"
 version = "0.1.0"
 description = "3D TransUNet segmentation and parcellation + CortexODE surface reconstruction."
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "huggingface-hub",
     "joblib",
