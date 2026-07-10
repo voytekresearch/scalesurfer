@@ -4,6 +4,14 @@ version = "0.1.0"
 description = "Fast 3D brain segmentation and FreeSurfer-like statistics inference."
 readme = "README.md"
 requires-python = ">=3.12"
+authors = [
+    {name = "Ryan Hammonds"},
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
 dependencies = [
     "huggingface-hub",
     "joblib",
@@ -25,6 +33,7 @@ dependencies = [
 test = [
     "pytest",
 ]
+
 openneuro = [
     "boto3",
     "botocore",
@@ -41,9 +50,21 @@ openneuro = [
     "tqdm",
 ]
 
+[project.urls]
+Homepage = "https://github.com/voytekresearch/scalesurfer"
+Repository = "https://github.com/voytekresearch/scalesurfer"
+Issues = "https://github.com/voytekresearch/scalesurfer/issues"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["scalesurfer"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/scalesurfer",
+    "/README.md",
+    "/pyproject.toml",
+]
