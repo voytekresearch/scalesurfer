@@ -1,8 +1,16 @@
 # scalesufer
 
-`scalesurfer` is a repository for fast FreeSurfer inference. The volumetric model uses UNet (local scale), with a Transformer bottlenck (global scale). The stats models predict FreeSurfer stats.
+`scalesurfer` is a repository for fast FreeSurfer inference. The volumetric model uses UNet with a Transformer bottleneck. The stats models predict FreeSurfer measureing, including cortical thickness, surface area, curvature, and folding index.
+
+## Installation
+
+```bash
+pip install scalesurfer
+```
 
 ## Usage
+
+See the inference [notebook](https://github.com/voytekresearch/scalesurfer/blob/master/docs/notebooks/03_inference/08_inference.ipynb) for additional settings for faster processing.
 
 ```python
 from scalesurfer import ScaleSurfer
@@ -24,4 +32,7 @@ surfer.plot_volume(subjects[0])
 df_stats = surfer.predict_stats()
 ```
 
-See the inference [notebook](https://github.com/voytekresearch/scalesurfer/blob/master/docs/notebooks/03_inference/08_inference.ipynb) for additional settings for faster processing.
+## GPU
+
+All models are implemented with pytorch and inference time depends on GPU. CPU-based inference will be much slower. These models were developed on an NVIDIA card with 32 GB of VRAM and 64 RAM. With this hardware, the settings in the inference [notebook](https://github.com/voytekresearch/scalesurfer/blob/master/docs/notebooks/03_inference/08_inference.ipynb) worked well. Please open an issue if inference fails on your hardware.
+
