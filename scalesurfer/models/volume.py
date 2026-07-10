@@ -6,8 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..config import PATCH_SIZE
-from ..utils import ensure_divisible, volume_to_patches
+from ..training.volume.config import PATCH_SIZE
+from ..training.volume.utils import ensure_divisible, volume_to_patches
 
 def _profile_enabled() -> bool:
     return _profile_level() > 0

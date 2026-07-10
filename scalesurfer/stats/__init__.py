@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .models import (
+from ..models.stats import (
     FEATURE_SCHEMA,
     LABEL_SIZE_FEATURE_NAMES,
     REGION_POOL_STAT_NAMES,
@@ -25,7 +25,7 @@ from .inference import (
     stats_repo_name,
     write_stats_outputs,
 )
-from .train import (
+from ..training.stats.train import (
     TrainResult,
     checkpoint_payload,
     evaluate_stats_model,

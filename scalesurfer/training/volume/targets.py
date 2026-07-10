@@ -16,7 +16,7 @@ from joblib import Parallel, delayed
 from nibabel.freesurfer.io import read_geometry
 from nibabel.processing import resample_from_to
 
-from ..convert import TARGET_SHAPE, TARGET_VOXEL_SIZE_MM, load_mgz, prepare_arrays_if_needed, prepare_images_if_needed
+from ...convert import TARGET_SHAPE, TARGET_VOXEL_SIZE_MM, load_mgz, prepare_arrays_if_needed, prepare_images_if_needed
 
 
 SURFACE_CLASS_MAP = {

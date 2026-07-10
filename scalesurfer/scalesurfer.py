@@ -12,7 +12,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
-from scalesurfer.config import DEVICE
+from scalesurfer.training.volume.config import DEVICE
 import nibabel as nib
 from nibabel.processing import resample_from_to
 import pandas as pd
@@ -22,7 +22,7 @@ from scalesurfer.data import (
     build_label_lut,
     default_aparc_aseg_label_values,
 )
-from scalesurfer.metrics import dense_labels_to_fs_ids
+from scalesurfer.evaluation.volume import dense_labels_to_fs_ids
 from scalesurfer.stats import (
     PREDICTED_STATS_LONG_FILENAME,
     PREDICTED_STATS_PROVENANCE_FILENAME,
@@ -31,8 +31,8 @@ from scalesurfer.stats import (
     stats_long_to_wide,
     write_stats_outputs,
 )
-from scalesurfer.volume import fs as _fs
-from scalesurfer.volume.model import TransUNet3D
+from scalesurfer.integrations import freesurfer as _fs
+from scalesurfer.models.volume import TransUNet3D
 
 
 _VOLUME_MODEL_FILENAME = "transunet3d.safetensors"

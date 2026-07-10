@@ -13,9 +13,9 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
-from ..config import SEED
+from ..training.volume.config import SEED
 from ..experiments import build_v8_split_from_root
-from ..splits import assert_disjoint_split, split_from_manifest
+from ..training.volume.splits import assert_disjoint_split, split_from_manifest
 from ..volume.eval import parse_freesurfer_stats
 
 

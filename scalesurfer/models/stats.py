@@ -8,8 +8,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..data import default_aparc_aseg_label_values
-from ..volume.model import TransUNet3D
-from .utils import strip_compile_prefix
+from .volume import TransUNet3D
+from ..stats.utils import strip_compile_prefix
 
 
 def load_transunet_from_checkpoint(checkpoint_path: str | Path, device: str | torch.device = "cpu") -> tuple[TransUNet3D, dict]:

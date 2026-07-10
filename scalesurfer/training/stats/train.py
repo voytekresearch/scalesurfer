@@ -12,8 +12,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from .models import StatsPredictionModel, build_stats_model
-from .utils import (
+from ...models.stats import StatsPredictionModel, build_stats_model
+from ...stats.utils import (
     group_for_target,
     load_or_build_pooled_feature_cache,
     make_stats_feature_loader,

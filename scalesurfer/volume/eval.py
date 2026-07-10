@@ -17,9 +17,9 @@ from nibabel.processing import resample_from_to
 from scipy.spatial import cKDTree
 
 from ..convert import load_mgz
-from .norm import build_deterministic_norm
-from .targets import dequantize_norm_volume, load_tensor
-from .fs import build_config, run
+from ..integrations.freesurfer_norm import build_deterministic_norm
+from ..training.volume.targets import dequantize_norm_volume, load_tensor
+from ..integrations.freesurfer import build_config, run
 
 
 VOLUME_TARGETS = (

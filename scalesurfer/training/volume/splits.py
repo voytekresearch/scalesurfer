@@ -9,7 +9,7 @@ from time import strftime
 import torch
 
 from .config import MODULE_PATH, SEED
-from .data import resolve_paths, split_pairs_by_group
+from ...data import resolve_paths, split_pairs_by_group
 
 
 DEFAULT_TRAINING_CHECKPOINT = MODULE_PATH.parent / "checkpoints" / "transunet3d_best.pt"

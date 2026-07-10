@@ -12,9 +12,9 @@ import torch
 from tqdm.auto import tqdm
 
 from ..data import build_label_lut, default_aparc_aseg_label_values
-from ..metrics import dense_labels_to_fs_ids
-from ..volume.model import TransUNet3D
-from .models import StatsPredictionModel, TransUNetEncoderAdapter
+from ..evaluation.volume import dense_labels_to_fs_ids
+from ..models.volume import TransUNet3D
+from ..models.stats import StatsPredictionModel, TransUNetEncoderAdapter
 from .utils import (
     APARC_STATS_NAMES,
     APARC_TABLE_COLUMNS,

@@ -7,7 +7,7 @@ from .config import DATA_CFG as DEFAULT_DATA_CFG
 from .config import DEVICE, PATCH_SIZE, SEED, TRAIN_CFG as DEFAULT_TRAIN_CFG
 from .config import MODULE_PATH
 from .config import build_runtime_cfgs
-from .data import (
+from ...data import (
     build_cache_for_pairs,
     build_dataset,
     build_label_lut,
@@ -19,7 +19,7 @@ from .data import (
     split_pairs_by_group,
 )
 from .utils import ensure_divisible
-from . import data as data_mod
+from ... import data as data_mod
 from . import train as train_mod
 from . import utils as utils_mod
 

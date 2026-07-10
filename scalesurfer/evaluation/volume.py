@@ -13,8 +13,8 @@ import torch.nn.functional as F
 from scipy.ndimage import binary_erosion, distance_transform_edt
 from tqdm.auto import tqdm
 
-from .config import DEVICE, MODULE_PATH
-from .data import load_freesurfer_lut
+from ..training.volume.config import DEVICE, MODULE_PATH
+from ..data import load_freesurfer_lut
 
 
 _CLASS_PLACEHOLDER_RE = re.compile(r"^class_\d+$")
@@ -321,7 +321,7 @@ def predict_volume_from_unpadded(
     The volume is padded to a patch-divisible shape using the same collate logic
     as training/evaluation, then cropped back to original shape.
     """
-    from .data import collate_pad_to_patch
+    from ..data import collate_pad_to_patch
 
     x = _as_3d_float_tensor(x_3d)
     d, h, w = (int(v) for v in x.shape)
@@ -1291,7 +1291,7 @@ def preprocess_mgz_pair_to_padded_tensors(orig_path, aparc_path, label_lut, appl
     """
     # Local imports keep baseline metrics paths lightweight.
     from convert import prepare_arrays_if_needed
-    from .data import collate_pad_to_patch
+    from ..data import collate_pad_to_patch
 
     x_arr, y_arr = prepare_arrays_if_needed(orig_path, aparc_path)
 

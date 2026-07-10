@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, Subset
 from nibabel.freesurfer.io import write_geometry
 
-from .config import DATA_CFG, DEVICE, PATCH_SIZE, SEED, TRAIN_CFG
+from .training.volume.config import DATA_CFG, DEVICE, PATCH_SIZE, SEED, TRAIN_CFG
 
 
 def resolve_paths(items):
