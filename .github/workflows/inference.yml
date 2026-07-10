@@ -1,0 +1,30 @@
+name: inference
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  simulated-inference:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --extra test
+      - run: uv run pytest -q
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          MPLCONFIGDIR: /tmp/matplotlib
+      - name: Build and validate distributions
+        run: |
+          uv build
+          uvx twine check dist/*
+      - name: Verify released Hugging Face metadata paths
+        run: |
+          uv run python - <<'PY'
+          from huggingface_hub import hf_hub_download
+          for repo in ("rphammonds/scalesurfer-v7", "rphammonds/scalesurfer-stats-v7"):
+              print(hf_hub_download(repo_id=repo, filename="config.json"))
+          PY
