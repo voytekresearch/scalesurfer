@@ -23,3 +23,5 @@ surfer.predict_volumes()
 surfer.plot_volume(subjects[0])
 df_stats = surfer.predict_stats()
 ```
+
+See the inference [notebook](https://github.com/voytekresearch/scalesurfer/blob/master/docs/notebooks/03_inference/08_inference.ipynb) for additional settings for faster processing.
