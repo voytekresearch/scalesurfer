@@ -607,36 +607,3 @@ def load_freesurfer_lut(fs_lut_path):
                 "R": int(r), "G": int(g), "B": int(b), "A": int(a),
             })
     return pd.DataFrame(rows)
-
-
-def save_surfaces_to_subject_dir(
-    surfaces: dict[str, dict[str, np.ndarray]],
-    out_dir: str | Path,
-    volume_info: dict | None = None,
-) -> dict[str, Path]:
-    """
-    Write predicted surfaces as FreeSurfer binary surface files.
-    surfaces: dict of surface_name → {"vertices_ras": [N,3], "faces": [F,3]}
-    volume_info: FreeSurfer volume metadata (vox2ras, vox2ras_tkr, etc.) from orig.mgz.
-    Returns dict: surface_name → written path.
-    """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    paths = {}
-    for name, surf in surfaces.items():
-        verts = np.asarray(surf["vertices_ras"], dtype=np.float32)
-        faces = np.asarray(surf["faces"], dtype=np.int32)
-        if verts.shape[0] == 0:
-            print(f"Skipping {name}: empty surface")
-            continue
-        # CortexODE produces inward normals (negative nibabel signed_vol).
-        # FreeSurfer's mri_brainvol_stats needs outward normals (positive signed_vol)
-        # for CortexVol = PialVol - WhiteVol to be positive. Flip face winding.
-        faces = np.ascontiguousarray(faces[:, [0, 2, 1]])
-        out_path = out_dir / name
-        if volume_info is not None:
-            write_geometry(str(out_path), verts, faces, volume_info=volume_info)
-        else:
-            write_geometry(str(out_path), verts, faces)
-        paths[name] = out_path
-    return paths

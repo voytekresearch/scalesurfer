@@ -1,7 +1,7 @@
 [project]
 name = "scalesurfer"
 version = "0.1.0"
-description = "3D TransUNet segmentation and parcellation + CortexODE surface reconstruction."
+description = "Fast 3D brain segmentation and FreeSurfer-like statistics inference."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -22,6 +22,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+test = [
+    "pytest",
+]
 openneuro = [
     "boto3",
     "botocore",

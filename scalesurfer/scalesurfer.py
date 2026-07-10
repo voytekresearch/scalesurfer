@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from time import perf_counter, time
 from pathlib import Path
 from joblib import Parallel, delayed
-from math import ceil
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -22,14 +21,8 @@ from scalesurfer.convert import CONFORM_SHAPE, image_is_loadable, prepare_image
 from scalesurfer.data import (
     build_label_lut,
     default_aparc_aseg_label_values,
-    save_surfaces_to_subject_dir,
 )
 from scalesurfer.metrics import dense_labels_to_fs_ids
-from scalesurfer.surface.cortex_ode import (
-    PretrainedCortexODEConfig,
-    load_pretrained_model_bundles,
-    predict_surfaces_from_native_aparc,
-)
 from scalesurfer.stats import (
     PREDICTED_STATS_LONG_FILENAME,
     PREDICTED_STATS_PROVENANCE_FILENAME,
@@ -479,7 +472,6 @@ class ScaleSurfer:
         device=None,
         volume_dtype="float32",
         progress=True,
-        pretrained_data_name="adni",
         conform_backend="auto",
         compress_orig=False,
         async_writes=False,
@@ -533,7 +525,6 @@ class ScaleSurfer:
         self.batch_size =  batch_size
         self.n_jobs = n_jobs_cpu
         self.fs_version = _normalize_fs_version(fs_version)
-        self.pretrained_data_name = pretrained_data_name
         self.conform_backend = conform_backend
         self.compress_orig = bool(compress_orig)
         self.async_writes = bool(async_writes)
@@ -553,8 +544,6 @@ class ScaleSurfer:
         self.volume_dtype = _normalize_volume_dtype(volume_dtype)
 
         self._model_volume = None
-        self._model_surface_bundles = None
-        self._surface_config = None
         self._stats_predictors = {}
         self.predicted_volumes = None
         self.df_stats = None
@@ -576,8 +565,6 @@ class ScaleSurfer:
     def free(self) -> None:
         """Free memory."""
         self._empty_cache()
-        self._model_surface_bundles = None
-        self._surface_config = None
         self._model_volume = None
         self._stats_predictors = {}
         self.df_stats = None
@@ -629,24 +616,6 @@ class ScaleSurfer:
             self._model_volume.eval()
         return self._model_volume
 
-
-    @property
-    def surface_config(self):
-        """Lazy build CortexODE config."""
-        if self._surface_config is None:
-            self._surface_config = PretrainedCortexODEConfig(
-                data_name=self.pretrained_data_name,
-                device=torch.device(self.device),
-            )
-        return self._surface_config
-
-
-    @property
-    def model_surface(self):
-        """Lazy load pretrained CortexODE model bundles (white + pial, lh + rh)."""
-        if self._model_surface_bundles is None:
-            self._model_surface_bundles = load_pretrained_model_bundles(config=self.surface_config)
-        return self._model_surface_bundles
 
     def stats_predictor(
         self,
@@ -1280,17 +1249,6 @@ class ScaleSurfer:
             **plot_kwargs,
         )
 
-    def _predict_surface(self, subject, aparc_fs_np):
-        """Predict lh/rh white and pial surfaces for a single subject."""
-        subject_dir = self.subject_dir / subject
-        result = predict_surfaces_from_native_aparc(
-            subject_dir=subject_dir,
-            native_aparc=aparc_fs_np,
-            config=self.surface_config,
-            model_bundles=self.model_surface,
-        )
-        return result
-
     @staticmethod
     def _canonical_labels_to_orig_grid(labels: np.ndarray, orig_img: nib.spatialimages.SpatialImage) -> np.ndarray:
         """Map model-label tensors from canonical RAS voxel order back to orig.mgz voxels."""
@@ -1306,61 +1264,6 @@ class ScaleSurfer:
         native = resample_from_to(label_img, orig_img, order=0)
         return np.asarray(np.rint(native.get_fdata()), dtype=np.int32)
 
-
-    def predict_surfaces(self, batch_size: int | None = None):
-        """Predict lh/rh white and pial surfaces for all subjects and save."""
-        _ = self.surface_config  # trigger lazy load before timing starts
-        _ = self.model_surface   # trigger lazy load before timing starts
-        t0 = time()
-        bs = batch_size if batch_size is not None else self.batch_size
-        class_values, _ = build_label_lut(default_aparc_aseg_label_values())
-
-        for idx in self._tqdm(
-            range(0, len(self.subjects), bs),
-            total=ceil(len(self.subjects) / bs),
-            desc="Predicting surfaces",
-        ):
-            batch_subjs = self.subjects[idx : idx + bs]
-            for subj in batch_subjs:
-                mri_dir = self.subject_dir / subj / "mri"
-                aparc_dense = torch.load(mri_dir / "aparc+aseg.pt")
-                aparc_fs = dense_labels_to_fs_ids(aparc_dense, class_values=class_values)
-                if torch.is_tensor(aparc_fs):
-                    aparc_fs = aparc_fs.detach().cpu().numpy()
-                aparc_fs_np = np.asarray(aparc_fs, dtype=np.int32)
-                orig_img = nib.load(str(mri_dir / "orig.mgz"))
-                aparc_native = self._canonical_labels_to_orig_grid(aparc_fs_np, orig_img)
-                result = self._predict_surface(subj, aparc_native)
-                volume_info = self._surface_volume_info(mri_dir / "orig.mgz")
-                save_surfaces_to_subject_dir(
-                    result["surfaces"],
-                    self.subject_dir / subj / "surf",
-                    volume_info=volume_info,
-                )
-
-        if self.verbose:
-            self._log_timing("predict_surfaces", time() - t0)
-
-    @staticmethod
-    def _surface_volume_info(orig_mgz: Path) -> dict | None:
-        """Build nibabel surface volume_info from a FreeSurfer orig.mgz."""
-        try:
-            img = nib.load(str(orig_mgz))
-            affine = img.affine
-            voxelsize = np.sqrt((affine[:3, :3] ** 2).sum(axis=0))
-            return {
-                "head": np.array([20], dtype=np.int32),
-                "valid": "1  # volume info valid",
-                "filename": str(orig_mgz),
-                "volume": np.array(img.shape[:3], dtype=np.int32),
-                "voxelsize": voxelsize,
-                "xras": affine[:3, 0] / voxelsize[0],
-                "yras": affine[:3, 1] / voxelsize[1],
-                "zras": affine[:3, 2] / voxelsize[2],
-                "cras": np.array(img.header["Pxyz_c"], dtype=np.float64),
-            }
-        except Exception:
-            return None
 
     def run_freesurfer_stats(
         self,

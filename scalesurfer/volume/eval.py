@@ -18,7 +18,6 @@ from scipy.spatial import cKDTree
 
 from ..convert import load_mgz
 from .norm import build_deterministic_norm
-from .surfaces import SURFACE_TARGET_KINDS, create_surface_prediction_bundle
 from .targets import dequantize_norm_volume, load_tensor
 from .fs import build_config, run
 
@@ -35,7 +34,6 @@ DIRECT_SURFACE_RELPATHS = (
     "surf/lh.pial",
     "surf/rh.pial",
 )
-SURFACE_MODEL_TARGETS = ("white_surfaces", "pial_surfaces")
 FINAL_VOLUME_OUTPUT_RELPATHS = (
     "mri/ribbon.mgz",
     "mri/aseg.mgz",
@@ -81,7 +79,7 @@ FINAL_STATS_RELPATHS = (
 
 def exact_flow_targets() -> dict[str, tuple[str, ...]]:
     return {
-        "tensor_models_required_now": VOLUME_TARGETS + SURFACE_MODEL_TARGETS,
+        "tensor_models_required_now": VOLUME_TARGETS,
         "deterministic_tensor_targets": DETERMINISTIC_TARGETS,
         "direct_surface_files_required_by_fs": DIRECT_SURFACE_RELPATHS,
     }
@@ -269,7 +267,7 @@ def create_prediction_bundle_from_tensors(
     out_root: str | Path,
     predictions: dict[str, np.ndarray | torch.Tensor],
     rawavg_tensor: np.ndarray | torch.Tensor | None = None,
-    surface_source: str = "predicted_tensors",
+    surface_source: str = "ground_truth",
     surface_bundle_dir: str | Path | None = None,
     link_mode: str = "symlink",
     force: bool = True,
@@ -317,15 +315,6 @@ def create_prediction_bundle_from_tensors(
     if surface_source == "ground_truth":
         for relpath in DIRECT_SURFACE_RELPATHS:
             _link_or_copy(subject_dir / relpath, bundle_root / relpath, link_mode=link_mode, force=force)
-    elif surface_source == "predicted_tensors":
-        create_surface_prediction_bundle(
-            subject_dir=subject_dir,
-            metadata_path=metadata_path,
-            predictions=predictions_local,
-            out_root=bundle_root,
-            force=force,
-            n_jobs=max(1, int(n_jobs)),
-        )
     elif surface_source == "prediction_bundle":
         if surface_bundle_dir is None:
             raise ValueError("surface_bundle_dir is required when surface_source='prediction_bundle'")
@@ -333,7 +322,7 @@ def create_prediction_bundle_from_tensors(
         for relpath in DIRECT_SURFACE_RELPATHS:
             _link_or_copy(surface_bundle_dir / relpath, bundle_root / relpath, link_mode=link_mode, force=force)
     else:
-        raise ValueError("surface_source must be 'predicted_tensors', 'ground_truth', or 'prediction_bundle'")
+        raise ValueError("surface_source must be 'ground_truth' or 'prediction_bundle'")
 
     if norm_meta is not None:
         norm_meta_path = bundle_root / "mri" / "norm.meta.json"
@@ -791,7 +780,6 @@ def evaluate_run(
 __all__ = [
     "DETERMINISTIC_TARGETS",
     "DIRECT_SURFACE_RELPATHS",
-    "SURFACE_MODEL_TARGETS",
     "VOLUME_TARGETS",
     "build_deterministic_norm_prediction",
     "FINAL_MORPH_RELPATHS",
