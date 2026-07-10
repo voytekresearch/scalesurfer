@@ -1,6 +1,6 @@
 [project]
 name = "scalesurfer"
-version = "0.1.0"
+version = "0.1.1"
 description = "Fast 3D brain segmentation and FreeSurfer-like statistics inference."
 readme = "README.md"
 requires-python = ">=3.11"
