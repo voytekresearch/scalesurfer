@@ -1,6 +1,6 @@
 # scalesufer
 
-`scalesurfer` is a repository for fast FreeSurfer inference. The volumetric model uses UNet with a Transformer bottleneck. The stats models predict FreeSurfer measureing, including cortical thickness, surface area, curvature, and folding index.
+`scalesurfer` is a repository for fast FreeSurfer inference. The volumetric model uses UNet with a Transformer bottleneck. The stats models predict FreeSurfer measures, including cortical thickness, surface area, curvature, and folding index.
 
 ## Installation
 
