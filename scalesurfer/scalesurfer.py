@@ -10,6 +10,7 @@ import torch
 from joblib import Parallel, delayed
 from tqdm.auto import tqdm
 
+from scalesurfer.convert import export_subject_volume
 from scalesurfer.inference._datasets import StatsTensorDataset, VolumeOrigDataset
 from scalesurfer.inference._io import write_stats_prediction_job, write_volume_prediction_job
 from scalesurfer.inference._models import (
@@ -691,4 +692,32 @@ class ScaleSurfer(ScaleSurferRuntime):
             colorbar=colorbar,
             display_mode=display_mode,
             **plot_kwargs,
+        )
+
+    def export_volumes(
+        self,
+        *,
+        format: str = "mgz",
+        subject: str | None = None,
+        n_jobs_cpu: int | None = None,
+    ) -> list[Path]:
+        """Export predicted volumes as MGZ or NIfTI files.
+
+        By default all subjects are exported in parallel. Pass ``subject`` to
+        export only one subject.
+        """
+        known_subjects = {str(item) for item in self.subjects}
+        if subject is not None:
+            subject = str(subject)
+            if subject not in known_subjects:
+                raise ValueError(f"Unknown subject: {subject!r}")
+            return [export_subject_volume(self.subject_dir, subject, format=format)]
+
+        subjects = [str(item) for item in self.subjects]
+        jobs = self.n_jobs if n_jobs_cpu is None else int(n_jobs_cpu)
+        if jobs == 0:
+            jobs = 1
+        return Parallel(n_jobs=jobs)(
+            delayed(export_subject_volume)(self.subject_dir, item, format=format)
+            for item in self._tqdm(subjects, total=len(subjects), desc=f"Exporting {format}")
         )

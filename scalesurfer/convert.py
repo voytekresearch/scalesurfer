@@ -11,15 +11,27 @@ import subprocess
 from typing import Any
 from typing import Tuple
 
-from nilearn.datasets import load_mni152_template
 import numpy as np
 import torch
 from nibabel.processing import conform, resample_from_to
 from tqdm.contrib.concurrent import process_map
+
 from nilearn.image import resample_img
+from nilearn.datasets import load_mni152_template
+from nibabel.orientations import (
+    apply_orientation,
+    io_orientation,
+    ornt_transform,
+)
 
 import nibabel as nib
 from nibabel.filebasedimages import ImageFileError
+
+from scalesurfer.data import (
+    build_label_lut,
+    default_aparc_aseg_label_values,
+)
+
 
 TARGET_VOXEL_SIZE_MM = 1.0
 TARGET_SHAPE = (256, 256, 256)
@@ -726,3 +738,74 @@ def prepare_image(
 
     data = img.get_fdata(dtype=np.float32)
     return _zscore_volume_for_model(torch.from_numpy(data)).contiguous()
+
+
+def _load_subject_segmentation(subjects_dir: str | Path, subject: str):
+    """Load and decode an inference segmentation in canonical RAS space."""
+    mri_dir = Path(subjects_dir) / str(subject) / "mri"
+    orig_native = nib.load(mri_dir / "orig.mgz")
+    orig_ras = nib.as_closest_canonical(orig_native)
+    dense_ras = torch.load(
+        mri_dir / "aparc+aseg.pt",
+        map_location="cpu",
+        weights_only=True,
+    ).detach().squeeze().long()
+
+    if dense_ras.ndim != 3 or tuple(dense_ras.shape) != tuple(orig_ras.shape):
+        raise ValueError(
+            f"Shape mismatch: prediction={tuple(dense_ras.shape)}, "
+            f"RAS orig={orig_ras.shape}"
+        )
+
+    class_values, _ = build_label_lut(default_aparc_aseg_label_values())
+    if dense_ras.numel() == 0 or int(dense_ras.min()) < 0 or int(dense_ras.max()) >= len(class_values):
+        raise ValueError("Prediction contains an invalid dense class index")
+
+    seg_ras = class_values[dense_ras].numpy().astype(np.int32)
+    return mri_dir, orig_native, orig_ras, seg_ras
+
+
+def export_subject_to_mgz(subjects_dir: str | Path, subject: str) -> Path:
+    """Export one ``aparc+aseg.pt`` prediction as a native-space MGZ."""
+    mri_dir, orig_native, orig_ras, seg_ras = _load_subject_segmentation(subjects_dir, subject)
+    ras_to_native = ornt_transform(
+        io_orientation(orig_ras.affine),
+        io_orientation(orig_native.affine),
+    )
+    seg_native = apply_orientation(seg_ras, ras_to_native)
+    seg_img = nib.MGHImage(
+        seg_native,
+        orig_native.affine,
+        header=orig_native.header.copy(),
+    )
+    seg_img.set_data_dtype(np.int32)
+
+    output_path = mri_dir / "aparc+aseg.mgz"
+    nib.save(seg_img, output_path)
+    return output_path
+
+
+def export_subject_to_nii(subjects_dir: str | Path, subject: str) -> Path:
+    """Export one ``aparc+aseg.pt`` prediction as a canonical-RAS NIfTI."""
+    mri_dir, _, orig_ras, seg_ras = _load_subject_segmentation(subjects_dir, subject)
+    seg_img = nib.Nifti1Image(seg_ras, orig_ras.affine)
+    seg_img.set_data_dtype(np.int32)
+
+    output_path = mri_dir / "aparc+aseg.nii.gz"
+    nib.save(seg_img, output_path)
+    return output_path
+
+
+def export_subject_volume(
+    subjects_dir: str | Path,
+    subject: str,
+    *,
+    format: str = "mgz",
+) -> Path:
+    """Export one prediction as ``mgz`` or ``nii.gz``."""
+    key = str(format).strip().lower().lstrip(".")
+    if key == "mgz":
+        return export_subject_to_mgz(subjects_dir, subject)
+    if key in {"nii", "nii.gz", "nifti"}:
+        return export_subject_to_nii(subjects_dir, subject)
+    raise ValueError("format must be 'mgz' or 'nii.gz'")
